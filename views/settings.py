@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import tkinter as tk
 from tkinter import filedialog
 from typing import Any
@@ -158,7 +157,7 @@ class SettingsView(ctk.CTkFrame):
 
     def _detect_ffmpeg(self) -> None:
         """Fill the ffmpeg field with the binary found on PATH."""
-        found = shutil.which("ffmpeg") or ""
+        found = ffmpeg_utils.find_tool("ffmpeg")
         self.ffmpeg_var.set(found)
         self.binary_status.configure(text=found or "ffmpeg not found on PATH")
 

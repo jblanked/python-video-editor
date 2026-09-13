@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 from typing import Any, Callable
@@ -11,10 +10,9 @@ from typing import Any, Callable
 import requests
 
 from tools import ffmpeg_utils as ff
+from tools import paths
 from tools.dispatch import execute_tool
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_PATH = os.path.dirname(BASE_DIR)
 DEFAULT_PROVIDER_ID = "openai"
 MAX_TOOL_ITERATIONS = 50
 REQUEST_TIMEOUT = 180
@@ -35,11 +33,12 @@ practical, and use tools instead of guessing."
 
 def get_llm_config() -> list[dict]:
     """Load the provider list from settings/llm.json, copying the default file when missing."""
-    path = os.path.join(ROOT_PATH, "settings", "llm.json")
-    if not os.path.exists(path):
-        default_path = os.path.join(ROOT_PATH, "settings", "llm_base.json")
-        if not os.path.exists(default_path):
+    path = paths.config_dir() / "llm.json"
+    if not path.exists():
+        default_path = paths.bundle_dir() / "settings" / "llm_base.json"
+        if not default_path.exists():
             raise FileNotFoundError(f"Default LLM config not found at {default_path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(default_path, path)
     with open(path, "r", encoding="utf-8") as handle:
         return json.loads(handle.read())
@@ -165,7 +164,8 @@ def save_api_key(provider_id: str, api_key: str) -> None:
     for provider in providers:
         if provider.get("vendor") == provider_id:
             provider["apiKey"] = api_key
-    path = os.path.join(ROOT_PATH, "settings", "llm.json")
+    path = paths.config_dir() / "llm.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(providers, handle, indent=4)
 

@@ -10,12 +10,11 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from tools import context, ffmpeg_utils, playback
+from tools import context, ffmpeg_utils, paths, playback
 from tools.project import Project
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-PREFS_FILE = ROOT_DIR / "settings" / "preferences.json"
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "output"
+PREFS_FILE = paths.config_dir() / "preferences.json"
+DEFAULT_OUTPUT_DIR = paths.data_dir() / "output"
 
 NAV_ITEMS = (
     ("clips", "Clips"),

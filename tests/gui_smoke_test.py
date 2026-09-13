@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import context, preview  # noqa: E402
+from tools import context, paths, preview  # noqa: E402
 from tools.registry import find_op  # noqa: E402
 from views.app import VideoEditorApp  # noqa: E402
 from views.op_form import OperationDialog  # noqa: E402
@@ -21,6 +21,9 @@ SAMPLE_B = "/tmp/ve_test/sample_b.mp4"
 
 def exercise(app: VideoEditorApp) -> None:
     """Drive the views programmatically to catch wiring errors."""
+    root = Path(__file__).resolve().parents[1]
+    assert paths.bundle_dir() == root, paths.bundle_dir()
+    assert paths.data_dir() == root, paths.data_dir()
     clips = app._views["clips"]
     timeline = app._views["timeline"]
     assistant = app._views["assistant"]

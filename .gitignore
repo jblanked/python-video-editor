@@ -5,6 +5,8 @@ __pycache__/
 *.log
 *.tmp
 .env
+build/
+dist/
 llm.json
 output/
 preferences.json

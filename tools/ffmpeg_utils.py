@@ -13,6 +13,11 @@ from typing import Any
 
 DEFAULT_TIMEOUT = 900
 WINDOWS_FLAGS = 0x08000000 if os.name == "nt" else 0
+COMMON_BIN_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+)
 FONT_CANDIDATES = (
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Verdana.ttf",
@@ -116,12 +121,24 @@ def format_time(seconds: Any) -> str:
     return f"{hours:02d}:{minutes:02d}:{total % 60:06.3f}"
 
 
+def find_tool(name: str, fallback: str = "") -> str:
+    """Locate a binary on PATH or in the usual macOS package folders."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for folder in COMMON_BIN_DIRS:
+        candidate = Path(folder) / name
+        if candidate.is_file():
+            return str(candidate)
+    return fallback
+
+
 def get_ffmpeg_path() -> str:
     """Return the ffmpeg binary path from settings, PATH, or the default name."""
     configured = _config.get("ffmpeg")
     if configured:
         return str(configured)
-    return shutil.which("ffmpeg") or "ffmpeg"
+    return find_tool("ffmpeg", "ffmpeg")
 
 
 def get_ffplay_path() -> str:
@@ -131,7 +148,7 @@ def get_ffplay_path() -> str:
         sibling = Path(str(configured)).with_name("ffplay")
         if sibling.exists():
             return str(sibling)
-    return shutil.which("ffplay") or ""
+    return find_tool("ffplay")
 
 
 def get_ffprobe_path() -> str:
@@ -143,7 +160,7 @@ def get_ffprobe_path() -> str:
         sibling = Path(str(_config["ffmpeg"])).with_name("ffprobe")
         if sibling.exists():
             return str(sibling)
-    return shutil.which("ffprobe") or "ffprobe"
+    return find_tool("ffprobe", "ffprobe")
 
 
 def has_audio(info: dict) -> bool:
