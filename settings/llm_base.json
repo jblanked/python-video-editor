@@ -1,0 +1,54 @@
+[
+    {
+        "name": "OpenAI",
+        "vendor": "openai",
+        "apiKey": "",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "models": [
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.6-sol",
+            "gpt-5.4-nano"
+        ]
+    },
+    {
+        "name": "Anthropic",
+        "vendor": "anthropic",
+        "apiKey": "",
+        "endpoint": "https://api.anthropic.com/v1/messages",
+        "models": [
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-opus-5"
+        ]
+    },
+    {
+        "name": "DeepSeek",
+        "vendor": "deepseek",
+        "apiKey": "",
+        "endpoint": "https://api.deepseek.com/chat/completions",
+        "models": [
+            "deepseek-v4.1-flash",
+            "deepseek-v4-pro"
+        ]
+    },
+    {
+        "name": "Grok",
+        "vendor": "grok",
+        "apiKey": "",
+        "endpoint": "https://api.x.ai/v1/chat/completions",
+        "models": [
+            "grok-4.6",
+            "grok-4.5"
+        ]
+    },
+    {
+        "name": "JBlanked",
+        "vendor": "jblanked",
+        "apiKey": "",
+        "endpoint": "https://www.jblanked.com/ai/v1/chat/completions",
+        "models": [
+            "jblanked-v1"
+        ]
+    }
+]

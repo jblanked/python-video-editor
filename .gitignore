@@ -1,0 +1,10 @@
+.DS_Store
+venv/
+__pycache__/
+*.pyc
+*.log
+*.tmp
+.env
+llm.json
+output/
+preferences.json
