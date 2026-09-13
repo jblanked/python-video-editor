@@ -9,7 +9,13 @@ A built-in AI assistant can run any editing operation for you.
 - ffmpeg and ffprobe on PATH (macOS: `brew install ffmpeg`)
 
 ## Setup
+### 1. Clone the repository:
+```
+git clone https://github.com/jblanked/python-video-editor.git
+cd python-video-editor
+```
 
+### 2. Set up the virtual environment:
 Windows
 ```
 python -m venv venv
@@ -24,8 +30,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run
-
+### 3. Run the application:
 ```
 python main.py
 ```
