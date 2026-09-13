@@ -1,4 +1,4 @@
-# Video Editor
+# Python Video Editor
 
 A desktop video editor for local files, built with customtkinter and ffmpeg.
 A built-in AI assistant can run any editing operation for you.
@@ -10,28 +10,28 @@ A built-in AI assistant can run any editing operation for you.
 
 ## Setup
 ### 1. Clone the repository:
-```
+```sh
 git clone https://github.com/jblanked/python-video-editor.git
 cd python-video-editor
 ```
 
 ### 2. Set up the virtual environment:
 Windows
-```
+```sh
 python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 Mac/Linux
-```
+```sh
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### 3. Run the application:
-```
+```sh
 python main.py
 ```
 
@@ -69,3 +69,14 @@ Set the theme, output folder and ffmpeg path, and the single AI setup used by
 both the assistant and transcription: provider, model and API key. Pick a
 different provider under "Transcribe with" if your chat provider does not
 offer audio. Keys are stored in `settings/llm.json`.
+
+## Build as an app
+
+```sh
+cd python-video-editor
+source venv/bin/activate # or on Windows use .\venv\Scripts\activate
+pyinstaller PythonVideoEditor.spec
+```
+
+The bundle lands in `dist/Python Video Editor.app` (macOS). Frozen builds keep their
+settings and output in `~/Library/Application Support/VideoEditor`.
