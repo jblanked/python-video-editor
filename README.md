@@ -37,14 +37,14 @@ python main.py
 
 ## Features
 
-- **Clips** - import media with thumbnails, preview it, and run per-clip
-  operations (see the list below). Add to Timeline appends the selected clip;
-  Add All To Timeline appends the whole pool in order.
-- **Timeline** - a horizontal strip of clips with an embedded preview player.
-  Drag clips to reorder, drag their edges to trim, double-click to preview from
-  a clip, zoom the strip, drag the playhead to start anywhere, and play with
-  the button or the space bar. Right-click a clip for every operation that
-  applies to it. Projects can be saved and the sequence rendered into one file.
+- **Timeline** - the single editor view: a media pool on the left and a
+  horizontal strip of clips with an embedded preview player. Add media to the
+  pool with thumbnails, preview a clip, and add it to the timeline, or add
+  the whole pool in order, or drag a pool card straight onto the strip. Drag
+  clips to reorder, drag their edges to trim, double-click to preview from a
+  clip, zoom the strip, drag the playhead to start anywhere, and play with the
+  button or the space bar. Right-click a clip for every operation that applies
+  to it. Projects can be saved and the sequence rendered into one file.
 - **AI Assistant** - describe an edit in chat and the assistant runs the
   editor's operations, for example "trim the first clip to five seconds and
   add a fade" or "remove all white space from the timeline". Ctrl+Enter sends,

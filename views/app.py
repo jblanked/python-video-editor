@@ -17,7 +17,6 @@ PREFS_FILE = paths.config_dir() / "preferences.json"
 DEFAULT_OUTPUT_DIR = paths.data_dir() / "output"
 
 NAV_ITEMS = (
-    ("clips", "Clips"),
     ("timeline", "Timeline"),
     ("assistant", "AI Assistant"),
     ("settings", "Settings"),
@@ -25,7 +24,7 @@ NAV_ITEMS = (
 
 
 class VideoEditorApp(ctk.CTk):
-    """Main window hosting the clips, timeline, assistant, and settings views."""
+    """Main window hosting the timeline, assistant, and settings views."""
 
     def __init__(self) -> None:
         """Build the window, create the views, and restore saved preferences."""
@@ -47,7 +46,7 @@ class VideoEditorApp(ctk.CTk):
         self._nav_buttons: dict[str, ctk.CTkButton] = {}
         self.status_label: ctk.CTkLabel | None = None
         self._build_ui()
-        self.show_view("clips")
+        self.show_view("timeline")
         self.after(300, self._check_ffmpeg)
 
     def destroy(self) -> None:
@@ -145,12 +144,10 @@ class VideoEditorApp(ctk.CTk):
         container.rowconfigure(0, weight=1)
 
         from views.assistant import AssistantView
-        from views.clips import ClipsView
         from views.settings import SettingsView
         from views.timeline import TimelineView
 
         self._views = {
-            "clips": ClipsView(container, self),
             "timeline": TimelineView(container, self),
             "assistant": AssistantView(container, self),
             "settings": SettingsView(container, self),

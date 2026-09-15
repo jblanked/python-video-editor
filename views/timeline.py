@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -9,9 +10,9 @@ from tkinter import filedialog
 from typing import Any
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageOps
 
-from tools import context, preview, transcribe_ops
+from tools import context, export_ops, preview, transcribe_ops
 from tools.registry import Op, get_ops
 from views.clip_strip import ZOOM_LEVELS, ClipStrip
 from views.op_form import OperationDialog
@@ -28,6 +29,10 @@ VIDEO_TYPES = [
 TICK_MS = 25
 PREPARE_POLL_MS = 80
 STILL_POLL_MS = 60
+THUMB_SIZE = (112, 63)
+THUMB_POLL_MS = 150
+DRAG_THRESHOLD = 6
+DRAG_ACCENT = ("#3B8ED0", "#1F6AA5")
 
 
 class TimelineView(ctk.CTkFrame):
@@ -38,7 +43,17 @@ class TimelineView(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self.selected_index: int | None = None
+        self.selected_path: str | None = None
         self._last_output: str | None = None
+        self._thumbnails: dict[str, ctk.CTkImage | None] = {}
+        self._thumb_labels: dict[str, ctk.CTkLabel] = {}
+        self._bitmaps: dict[str, Image.Image | None] = {}
+        self._thumb_busy = False
+        self._cards: dict[str, ctk.CTkFrame] = {}
+        self.cards: ctk.CTkScrollableFrame | None = None
+        self._drag_path: str | None = None
+        self._drag_start: tuple[int, int] = (0, 0)
+        self._dragging = False
         self._player = preview.PreviewPlayer()
         self._playing = False
         self._preparing = False
@@ -59,8 +74,9 @@ class TimelineView(ctk.CTkFrame):
         self.app.bind_all("<space>", self._on_space)
 
     def refresh(self) -> None:
-        """Rebuild the clip strip and transport from the project timeline."""
+        """Rebuild the pool cards, clip strip, and transport from the project."""
         timeline = self.app.project.timeline
+        self._refresh_pool()
         if self.selected_index is not None and self.selected_index >= len(timeline):
             self.selected_index = None
         total = self._total_duration()
@@ -147,10 +163,17 @@ class TimelineView(ctk.CTkFrame):
         return menu
 
     def _build_ui(self) -> None:
-        """Create the toolbar, preview player, clip strip, and render controls."""
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(7, weight=1)
-        toolbar = ctk.CTkFrame(self)
+        """Create the pool panel and the timeline editor area."""
+        self.columnconfigure(0, weight=2)
+        self.columnconfigure(1, weight=3)
+        self.rowconfigure(0, weight=1)
+        self._build_pool()
+
+        main = ctk.CTkFrame(self)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(7, weight=1)
+        toolbar = ctk.CTkFrame(main)
         toolbar.grid(row=0, column=0, sticky="ew")
         for text, command in (
             ("New", self._new_project),
@@ -164,10 +187,10 @@ class TimelineView(ctk.CTkFrame):
             ("Clear", self._clear),
         ):
             ctk.CTkButton(toolbar, text=text, width=86, command=command).pack(side="left", padx=3, pady=6)
-        self.total_label = ctk.CTkLabel(self, text="", anchor="w")
+        self.total_label = ctk.CTkLabel(main, text="", anchor="w")
         self.total_label.grid(row=1, column=0, sticky="ew", padx=6, pady=(4, 2))
 
-        player_frame = ctk.CTkFrame(self)
+        player_frame = ctk.CTkFrame(main)
         player_frame.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         self.video_label = ctk.CTkLabel(
             player_frame,
@@ -196,7 +219,7 @@ class TimelineView(ctk.CTkFrame):
             side="left", padx=(10, 0)
         )
 
-        strip_area = ctk.CTkFrame(self, fg_color="transparent")
+        strip_area = ctk.CTkFrame(main, fg_color="transparent")
         strip_area.grid(row=3, column=0, sticky="ew", padx=4, pady=(6, 0))
         ctk.CTkLabel(strip_area, text="Zoom", text_color=("gray40", "gray60")).pack(
             side="left", padx=(0, 4)
@@ -219,7 +242,7 @@ class TimelineView(ctk.CTkFrame):
         )
         self.strip.pack(side="left", fill="x", expand=True)
 
-        edit = ctk.CTkFrame(self)
+        edit = ctk.CTkFrame(main)
         edit.grid(row=4, column=0, sticky="ew", pady=(6, 0))
         ctk.CTkLabel(edit, text="In", width=22).pack(side="left", padx=(8, 2), pady=8)
         self.in_var = tk.StringVar()
@@ -230,7 +253,7 @@ class TimelineView(ctk.CTkFrame):
         ctk.CTkButton(edit, text="Apply", width=80, command=self._apply_range).pack(side="left", padx=10)
         ctk.CTkLabel(edit, text="Times accept seconds, MM:SS, or HH:MM:SS").pack(side="left", padx=6)
 
-        render = ctk.CTkFrame(self)
+        render = ctk.CTkFrame(main)
         render.grid(row=5, column=0, sticky="ew", pady=(6, 0))
         ctk.CTkLabel(render, text="Output").pack(side="left", padx=(8, 4), pady=8)
         self.output_var = tk.StringVar(value=str(context.get_output_dir() / "timeline.mp4"))
@@ -242,10 +265,297 @@ class TimelineView(ctk.CTkFrame):
             render, text="Open Result", width=100, state="disabled", command=self._open_output
         )
         self.open_button.pack(side="left", padx=(0, 8))
-        self.progress = ctk.CTkProgressBar(self, mode="indeterminate")
+        self.progress = ctk.CTkProgressBar(main, mode="indeterminate")
         self.progress.grid(row=6, column=0, sticky="ew", pady=(6, 2))
-        self.log = ctk.CTkTextbox(self, height=80, wrap="word", state="disabled")
+        self.log = ctk.CTkTextbox(main, height=80, wrap="word", state="disabled")
         self.log.grid(row=7, column=0, sticky="nsew", padx=4, pady=(2, 4))
+
+    def _build_pool(self) -> None:
+        """Create the media pool panel with its toolbar and cards."""
+        pool = ctk.CTkFrame(self)
+        pool.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        pool.columnconfigure(0, weight=1)
+        pool.rowconfigure(2, weight=1)
+        toolbar = ctk.CTkFrame(pool)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        for text, command, width in (
+            ("Add Clips", self._add_clips, 100),
+            ("Remove from Pool", self._remove_selected, 110),
+            ("Clear Pool", self._clear_pool, 90),
+        ):
+            ctk.CTkButton(toolbar, text=text, width=width, command=command).pack(side="left", padx=3)
+        toolbar2 = ctk.CTkFrame(pool)
+        toolbar2.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        for text, command, width in (
+            ("Add to Timeline", self._add_to_timeline, 110),
+            ("Add All To Timeline", self._add_all_to_timeline, 140),
+            ("Preview", self._preview_selected, 80),
+        ):
+            ctk.CTkButton(toolbar2, text=text, width=width, command=command).pack(side="left", padx=3)
+        self.cards = ctk.CTkScrollableFrame(pool, fg_color="transparent")
+        self.cards.grid(row=2, column=0, sticky="nsew", padx=4, pady=(4, 2))
+        hint = ctk.CTkLabel(
+            pool,
+            text="Drag a card onto the timeline strip to insert it.",
+            anchor="w",
+            text_color=("gray40", "gray60"),
+        )
+        hint.grid(row=3, column=0, sticky="w", padx=10, pady=(4, 2))
+
+    def _refresh_pool(self) -> None:
+        """Rebuild the media pool cards from the project media list."""
+        media = list(self.app.project.media)
+        if self.selected_path and self.selected_path not in {clip["path"] for clip in media}:
+            self.selected_path = None
+        for child in self.cards.winfo_children():
+            child.destroy()
+        self._cards = {}
+        self._thumb_labels = {}
+        if not media:
+            empty = ctk.CTkLabel(self.cards, text="No clips in the pool. Use Add Clips.", anchor="w")
+            empty.pack(fill="x", padx=6, pady=8)
+        for clip in media:
+            self._build_card(clip)
+        self._update_selection_ui()
+        self._start_thumbnails()
+
+    def _build_card(self, clip: dict) -> None:
+        """Create one media card with thumbnail, name, and metadata."""
+        path = clip["path"]
+        card = ctk.CTkFrame(self.cards, corner_radius=8)
+        card.pack(fill="x", padx=4, pady=3)
+        image = self._thumbnails.get(path)
+        thumb = ctk.CTkLabel(
+            card,
+            text="" if image is not None else "...",
+            image=image,
+            width=THUMB_SIZE[0],
+            height=THUMB_SIZE[1],
+        )
+        thumb.grid(row=0, column=0, rowspan=2, padx=(8, 6), pady=8)
+        thumb.bind("<Button-1>", lambda event, item=path: self._begin_drag(event, item))
+        thumb.bind("<B1-Motion>", self._drag_motion)
+        thumb.bind("<ButtonRelease-1>", lambda event, item=path: self._end_drag(event, item))
+        self._thumb_labels[path] = thumb
+        details = ctk.CTkFrame(card, fg_color="transparent")
+        details.grid(row=0, column=1, rowspan=2, sticky="ew", padx=(0, 8), pady=6)
+        card.columnconfigure(1, weight=1)
+        name = ctk.CTkLabel(details, text=clip["name"], anchor="w", font=ctk.CTkFont(size=13, weight="bold"))
+        name.pack(fill="x")
+        meta = (
+            f"{clip['width']}x{clip['height']}  |  {_duration_text(clip['duration'])}  |  "
+            f"{clip['size_bytes'] / 1e6:.1f} MB"
+        )
+        meta_label = ctk.CTkLabel(details, text=meta, anchor="w", text_color=("gray30", "gray70"))
+        meta_label.pack(fill="x")
+        for widget in (card, details, name, meta_label):
+            widget.bind("<Button-1>", lambda event, item=path: self._begin_drag(event, item))
+            widget.bind("<B1-Motion>", self._drag_motion)
+            widget.bind("<ButtonRelease-1>", lambda event, item=path: self._end_drag(event, item))
+        card.bind("<Double-Button-1>", lambda _event, item=path: self.app.open_path(item))
+        self._cards[path] = card
+
+    def _add_clips(self) -> None:
+        """Ask for video files and add them to the media pool."""
+        paths = filedialog.askopenfilenames(title="Add clips", filetypes=VIDEO_TYPES)
+        if not paths:
+            return
+        for path in paths:
+            try:
+                self.app.project.add_media(path)
+            except (ValueError, OSError) as exc:
+                self._log(f"Skipped {Path(path).name}: {exc}")
+        self._log(f"Added {len(paths)} clip(s) to the pool.")
+        self.app.refresh_views()
+
+    def _remove_selected(self) -> None:
+        """Remove the selected clip from the media pool."""
+        path = self._require_clip()
+        if path is None:
+            return
+        self.app.project.remove_media(path)
+        self.selected_path = None
+        self._log(f"Removed {Path(path).name} from the pool.")
+        self.app.refresh_views()
+
+    def _clear_pool(self) -> None:
+        """Remove every clip from the media pool."""
+        self.app.project.media.clear()
+        self.selected_path = None
+        self._log("Media pool cleared.")
+        self.app.refresh_views()
+
+    def _add_to_timeline(self) -> None:
+        """Add the selected pool clip to the end of the timeline."""
+        path = self._require_clip()
+        if path is None:
+            return
+        try:
+            segment = self.app.project.add_to_timeline(path)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot add to timeline: {exc}")
+            return
+        self._log(f"Added {segment['name']} to the timeline.")
+        self.app.refresh_views()
+
+    def _add_all_to_timeline(self) -> None:
+        """Add every clip in the media pool to the timeline in order."""
+        media = list(self.app.project.media)
+        if not media:
+            self._log("Add clips to the pool first.")
+            return
+        added = 0
+        for clip in media:
+            try:
+                self.app.project.add_to_timeline(clip["path"])
+                added += 1
+            except (ValueError, OSError) as exc:
+                self._log(f"Skipped {clip.get('name', 'clip')}: {exc}")
+        self._log(f"Added {added} clip(s) to the timeline.")
+        self.app.refresh_views()
+
+    def _preview_selected(self) -> None:
+        """Open the selected pool clip in the system player."""
+        if self.selected_path:
+            self.app.open_path(self.selected_path)
+
+    def _require_clip(self) -> str | None:
+        """Return the selected pool clip path, logging a hint when none is selected."""
+        if not self.selected_path:
+            self._log("Select a clip in the pool first.")
+            return None
+        return self.selected_path
+
+    def _select_pool(self, path: str) -> None:
+        """Select a pool card and highlight it."""
+        self.selected_path = path
+        self._update_selection_ui()
+
+    def _begin_drag(self, event: Any, path: str) -> None:
+        """Start a drag of a pool card toward the timeline strip."""
+        self._drag_path = path
+        self._drag_start = (int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0)))
+        self._dragging = False
+        card = self._cards.get(path)
+        if card is not None:
+            card.configure(border_width=2, border_color=DRAG_ACCENT)
+        self._log(f"Drag {Path(path).name} onto the strip to insert it.")
+
+    def _drag_motion(self, event: Any) -> None:
+        """Track the pointer and highlight the insertion index under it."""
+        path = self._drag_path
+        if path is None:
+            return
+        pointer_x, pointer_y = int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0))
+        if not self._dragging:
+            if abs(pointer_x - self._drag_start[0]) + abs(pointer_y - self._drag_start[1]) < DRAG_THRESHOLD:
+                return
+            self._dragging = True
+        if self.strip.over_strip(pointer_x, pointer_y):
+            self.strip.highlight_drop(self.strip.drop_index_at(pointer_x))
+        else:
+            self.strip.highlight_drop(None)
+
+    def _end_drag(self, event: Any, path: str) -> None:
+        """Drop the card onto the strip at the highlighted index."""
+        moved = self._dragging
+        self._drag_path = None
+        self._dragging = False
+        card = self._cards.get(path)
+        if card is not None:
+            card.configure(border_width=0)
+        if not moved:
+            self.strip.highlight_drop(None)
+            self._select_pool(path)
+            return
+        index = self.strip.drop_index_at(int(getattr(event, "x_root", 0)))
+        try:
+            segment = self.app.project.add_to_timeline(path, position=index)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot drop on strip: {exc}")
+            return
+        self._log(f"Dropped {segment['name']} at position {index + 1}.")
+        self.app.refresh_views()
+
+    def _update_selection_ui(self) -> None:
+        """Refresh card highlighting for the selected pool clip."""
+        for path, card in self._cards.items():
+            if path == self.selected_path:
+                card.configure(border_width=2, border_color=DRAG_ACCENT)
+            else:
+                card.configure(border_width=0)
+
+    def _apply_thumbnail(self, path: str, bitmap: Image.Image | None) -> None:
+        """Show a generated thumbnail on the matching card."""
+        if bitmap is None:
+            return
+        label = self._thumb_labels.get(path)
+        if label is None or not label.winfo_exists():
+            return
+        image = ctk.CTkImage(light_image=bitmap, dark_image=bitmap, size=THUMB_SIZE)
+        self._thumbnails[path] = image
+        label.configure(image=image, text="")
+
+    def _load_thumbnail(self, path: str) -> Image.Image | None:
+        """Render a thumbnail bitmap for a clip; safe to call off the UI thread."""
+        if path in self._bitmaps:
+            return self._bitmaps[path]
+        bitmap: Image.Image | None = None
+        thumb_dir = Path(tempfile.gettempdir()) / "video_editor_thumbs"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        target = thumb_dir / f"{Path(path).stem}_{abs(hash(path)) % 10**8}.jpg"
+        try:
+            if not target.exists():
+                export_ops.create_thumbnail(path, target, time="00:00:01", width=224)
+            with Image.open(target) as loaded:
+                fitted = ImageOps.contain(loaded.convert("RGB"), THUMB_SIZE)
+                canvas = Image.new("RGB", THUMB_SIZE, "#141414")
+                canvas.paste(
+                    fitted,
+                    (
+                        (THUMB_SIZE[0] - fitted.width) // 2,
+                        (THUMB_SIZE[1] - fitted.height) // 2,
+                    ),
+                )
+                bitmap = canvas
+        except (OSError, ValueError, RuntimeError):
+            bitmap = None
+        self._bitmaps[path] = bitmap
+        return bitmap
+
+    def _preload_thumbnails(self, paths: list[str]) -> None:
+        """Generate thumbnail bitmaps off the UI thread."""
+        for path in paths:
+            try:
+                self._load_thumbnail(path)
+            except (OSError, ValueError):
+                self._bitmaps[path] = None
+
+    def _poll_thumbnails(self) -> None:
+        """Apply finished thumbnails and stop polling once everything is done."""
+        pending: list[str] = []
+        for path in list(self._cards):
+            if path in self._thumbnails:
+                continue
+            if path in self._bitmaps:
+                self._apply_thumbnail(path, self._bitmaps[path])
+            else:
+                pending.append(path)
+        if pending:
+            self.after(THUMB_POLL_MS, self._poll_thumbnails)
+        else:
+            self._thumb_busy = False
+
+    def _start_thumbnails(self) -> None:
+        """Queue thumbnail generation for cards that do not have one yet."""
+        if self._thumb_busy:
+            return
+        pending = [path for path in self._cards if path not in self._thumbnails]
+        if not pending:
+            return
+        self._thumb_busy = True
+        threading.Thread(target=self._preload_thumbnails, args=(pending,), daemon=True).start()
+        self.after(THUMB_POLL_MS, self._poll_thumbnails)
 
     def _browse_output(self) -> None:
         """Pick an output file for the rendered timeline."""

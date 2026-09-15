@@ -56,6 +56,7 @@ class ClipStrip(ctk.CTkFrame):
         self._drag_start_range = (0.0, 0.0)
         self._drag_range = (0.0, 0.0)
         self._drag_moved = False
+        self._drop_index: int | None = None
         self._strip = ctk.CTkScrollableFrame(
             self, orientation="horizontal", height=BLOCK_HEIGHT + 26
         )
@@ -63,6 +64,7 @@ class ClipStrip(ctk.CTkFrame):
         self._playhead_line = ctk.CTkFrame(
             self._strip, width=2, height=BLOCK_HEIGHT, fg_color=PLAYHEAD_FG
         )
+        self._drop_marker = ctk.CTkFrame(self._strip, width=3, height=BLOCK_HEIGHT, fg_color=ACCENT)
         self.refresh()
 
     def refresh(self) -> None:
@@ -78,13 +80,15 @@ class ClipStrip(ctk.CTkFrame):
         if not timeline:
             self._empty_label = ctk.CTkLabel(
                 self._strip,
-                text="Timeline is empty - add clips from the Clips view or with Add Clip.",
+                text="Timeline is empty - add clips with Add Clips or drag a pool card onto the strip.",
                 anchor="w",
             )
             self._empty_label.pack(side="left", padx=12, pady=12)
         for index, segment in enumerate(timeline):
             self._blocks.append(self._build_block(index, segment))
+        self._drop_index = None
         self._playhead_line.lift()
+        self._drop_marker.lift()
         self._apply_selection()
         self.set_playhead(self._playhead)
 
@@ -110,6 +114,42 @@ class ClipStrip(ctk.CTkFrame):
             return
         self._pixels_per_second = value
         self.refresh()
+
+    def drop_index_at(self, pointer_x: int) -> int:
+        """Return the insertion index under the pointer (midpoint rule)."""
+        for index, block in enumerate(self._blocks):
+            left = block.winfo_rootx()
+            right = left + block.winfo_width()
+            if pointer_x < (left + right) / 2:
+                return index
+        return len(self._blocks)
+
+    def over_strip(self, pointer_x: int, pointer_y: int) -> bool:
+        """Return True when the pointer is inside the strip area."""
+        root_x = self._strip.winfo_rootx()
+        root_y = self._strip.winfo_rooty()
+        return (
+            root_x <= pointer_x < root_x + self._strip.winfo_width()
+            and root_y <= pointer_y < root_y + self._strip.winfo_height()
+        )
+
+    def highlight_drop(self, index: int | None) -> None:
+        """Show the marker at the insertion position."""
+        if index is None:
+            self._drop_index = None
+            self._drop_marker.place_forget()
+            return
+        self._drop_index = index
+        if not self._blocks:
+            self._drop_marker.place_forget()
+            return
+        anchor = self._blocks[index] if index < len(self._blocks) else self._blocks[-1]
+        strip_x = self._strip.winfo_rootx()
+        x = anchor.winfo_rootx() - strip_x
+        if index < len(self._blocks):
+            self._drop_marker.place(x=x, y=8)
+        else:
+            self._drop_marker.place(x=x + anchor.winfo_width(), y=8)
 
     def _abort_drag(self) -> None:
         """Drop any drag state, for example when the strip is rebuilt."""

@@ -24,7 +24,6 @@ def exercise(app: VideoEditorApp) -> None:
     root = Path(__file__).resolve().parents[1]
     assert paths.bundle_dir() == root, paths.bundle_dir()
     assert paths.data_dir() == root, paths.data_dir()
-    clips = app._views["clips"]
     timeline = app._views["timeline"]
     assistant = app._views["assistant"]
     settings = app._views["settings"]
@@ -36,40 +35,36 @@ def exercise(app: VideoEditorApp) -> None:
     app.project.add_media(SAMPLE)
     app.project.add_media(SAMPLE_B)
     app.refresh_views()
-    assert len(clips._cards) == 2, "two cards expected"
+    assert len(timeline._cards) == 2, "two pool cards expected"
 
-    clips._select(SAMPLE)
-    assert clips.selected_path == SAMPLE
-    clips._on_group_change("Clip")
-    assert clips._op_by_label, "clip operations should be listed"
-    clips._on_op_change("Trim")
-    assert clips._current_op is not None and clips._current_op.name == "trim_video"
-    widgets = clips.form.widgets
-    widgets["start"].set("1")
-    widgets["end"].set("3")
-    args = clips.form.collect()
+    timeline._select_pool(SAMPLE)
+    assert timeline.selected_path == SAMPLE
+
+    # Trim runs through the operation dialog (context menu flow).
+    trim_op = find_op("trim_video")
+    assert trim_op is not None
+    dialog = OperationDialog(
+        timeline, trim_op, SAMPLE, on_done=lambda result: timeline._on_operation_done(result, trim_op)
+    )
+    app.update()
+    dialog.form.widgets["start"].set("1")
+    dialog.form.widgets["end"].set("3")
+    args = dialog.form.collect()
     assert args["start"] == "1" and args["end"] == "3", args
     assert args.get("path") == SAMPLE, args
     assert args.get("output", "").endswith("sample_a_trim.mp4"), args
-
-    clips._run_op()
+    dialog.run_now()
     deadline = time.time() + 60
-    while time.time() < deadline and clips.run_button.cget("state") == "disabled":
+    while time.time() < deadline and dialog.run_button.cget("state") == "disabled":
         app.update()
         time.sleep(0.05)
-    assert clips.run_button.cget("state") == "normal", "trim operation did not finish"
-    log_text = clips.log.get("1.0", "end")
-    assert "[OK] trim_video" in log_text, log_text
-    assert clips._last_output and Path(clips._last_output).exists(), clips._last_output
+    assert dialog.run_button.cget("state") == "normal", "trim operation did not finish"
+    log_text = timeline.log.get("1.0", "end")
+    assert "[OK]" in log_text and "Trimmed clip saved" in log_text, log_text
+    assert Path(args.get("output", "")).exists(), args
+    dialog.destroy()
 
-    for group in clips._groups:
-        clips._on_group_change(group)
-    for group in ("Transform", "Audio", "Overlay", "Export"):
-        for label, op in clips._op_by_label.items():
-            clips._on_op_change(label)
-            assert clips._current_op is op
-
-    clips._add_to_timeline()
+    timeline._add_to_timeline()
     assert len(app.project.timeline) == 1
     timeline.refresh()
     assert len(timeline.strip._blocks) == 1, len(timeline.strip._blocks)
@@ -262,11 +257,11 @@ def exercise(app: VideoEditorApp) -> None:
     # Add All To Timeline appends every pool clip in order.
     before = len(app.project.timeline)
     pool_paths = [clip["path"] for clip in app.project.media]
-    clips._add_all_to_timeline()
+    timeline._add_all_to_timeline()
     assert len(app.project.timeline) == before + len(pool_paths), app.project.timeline
     added = [item["path"] for item in app.project.timeline[-len(pool_paths):]]
     assert added == pool_paths, added
-    assert "Added" in clips.log.get("1.0", "end")
+    assert "Added" in timeline.log.get("1.0", "end")
 
     # A finished agent tool run refreshes the other views.
     assistant._show_event(
@@ -316,7 +311,6 @@ def exercise(app: VideoEditorApp) -> None:
     settings._save_output()
 
     app.show_view("timeline")
-    app.show_view("clips")
     print("GUI interactions OK")
 
 
