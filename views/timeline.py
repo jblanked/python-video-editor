@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import tkinter as tk
@@ -13,6 +14,7 @@ import customtkinter as ctk
 from PIL import Image, ImageOps
 
 from tools import context, export_ops, preview, transcribe_ops
+from tools.project import layer_label
 from tools.registry import Op, get_ops
 from views.clip_strip import ZOOM_LEVELS, ClipStrip
 from views.op_form import OperationDialog
@@ -33,6 +35,60 @@ THUMB_SIZE = (112, 63)
 THUMB_POLL_MS = 150
 DRAG_THRESHOLD = 6
 DRAG_ACCENT = ("#3B8ED0", "#1F6AA5")
+
+
+class JsonEditor(ctk.CTkToplevel):
+    """Editable window for the project JSON; applies changes to the project."""
+
+    def __init__(self, master: Any, app: Any, project: Any) -> None:
+        super().__init__(master)
+        self.app = app
+        self.project = project
+        self.title("Project JSON")
+        self.geometry("900x620")
+        self.minsize(640, 420)
+        self.transient(master)
+        self._textbox = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self._textbox.pack(fill="both", expand=True, padx=10, pady=10)
+        self._text = ctk.CTkTextbox(self._textbox, wrap="none")
+        self._text.pack(fill="both", expand=True)
+        self._text.insert("1.0", json.dumps(project.to_dict(), indent=2))
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(
+            buttons,
+            text="Apply",
+            width=110,
+            command=self._apply,
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            buttons, text="Close", width=110, command=self._close
+        ).pack(side="left", padx=4)
+        self._status = ctk.CTkLabel(self, text="", anchor="w", wraplength=860)
+        self._status.pack(fill="x", padx=14, pady=(0, 10))
+        self.after(60, self.lift)
+
+    def _apply(self) -> None:
+        """Parse the edited JSON and update the project."""
+        try:
+            data = json.loads(self._text.get("1.0", "end"))
+        except json.JSONDecodeError as exc:
+            self._status.configure(text=f"Invalid JSON: {exc}", text_color="red")
+            return
+        if not isinstance(data, dict):
+            self._status.configure(text="Top level must be a JSON object.", text_color="red")
+            return
+        try:
+            self.project.load_dict(data)
+        except (ValueError, OSError) as exc:
+            self._status.configure(text=f"Cannot load project: {exc}", text_color="red")
+            return
+        self.app.refresh_views()
+        self._status.configure(text="Project updated.", text_color="green")
+
+    def _close(self) -> None:
+        """Close the editor without applying changes."""
+        self.destroy()
 
 
 class TimelineView(ctk.CTkFrame):
@@ -72,6 +128,14 @@ class TimelineView(ctk.CTkFrame):
         self._build_ui()
         self.refresh()
         self.app.bind_all("<space>", self._on_space)
+        for sequence in ("<Command-z>", "<Control-z>"):
+            self.app.bind_all(sequence, lambda _event: self._shortcut(self._undo))
+        for sequence in ("<Command-Shift-Z>", "<Command-Shift-z>", "<Control-Shift-Z>"):
+            self.app.bind_all(sequence, lambda _event: self._shortcut(self._redo))
+        for sequence in ("<Command-c>", "<Control-c>"):
+            self.app.bind_all(sequence, lambda _event: self._shortcut(self._copy))
+        for sequence in ("<Command-v>", "<Control-v>"):
+            self.app.bind_all(sequence, lambda _event: self._shortcut(self._paste))
 
     def refresh(self) -> None:
         """Rebuild the pool cards, clip strip, and transport from the project."""
@@ -82,12 +146,11 @@ class TimelineView(ctk.CTkFrame):
         total = self._total_duration()
         self.strip.refresh()
         self.strip.select(self.selected_index)
-        self.total_label.configure(
-            text=(
-                f"{len(timeline)} clip(s)  |  total {_duration_text(total)}  |  "
-                "drag clips to reorder, drag an edge to trim, double-click to preview"
-            )
+        total_label_text = (
+            f"{len(timeline)} clip(s) on {self.app.project.layer_count()} layer(s)  |  "
+            f"total {_duration_text(total)}  |  drag a clip up or down to change its layer"
         )
+        self.total_label.configure(text=total_label_text)
         if self._playing or self._preparing:
             self._halt()
         self.playhead_slider.configure(to=max(total, 0.001))
@@ -155,6 +218,16 @@ class TimelineView(ctk.CTkFrame):
                 )
             menu.add_cascade(label=group, menu=submenu)
         menu.add_separator()
+        menu.add_command(label="Detach Audio", command=lambda: self._detach_audio(index))
+        menu.add_command(label="Add New Layer", command=self._add_layer)
+        layer_menu = tk.Menu(menu, tearoff=0)
+        top = self.app.project.top_layer()
+        for layer in range(self.app.project.bottom_layer(), top + 2):
+            label = layer_label(layer) + (" (new)" if layer > top else "")
+            layer_menu.add_command(
+                label=label, command=lambda target=layer, item=index: self._send_to_layer(item, target)
+            )
+        menu.add_cascade(label="Move to layer", menu=layer_menu)
         menu.add_command(label="Preview from this clip", command=lambda: self._play(start_index=index))
         menu.add_command(label="Move Left", command=lambda: self._move_clip(index, -1))
         menu.add_command(label="Move Right", command=lambda: self._move_clip(index, 1))
@@ -175,18 +248,37 @@ class TimelineView(ctk.CTkFrame):
         main.rowconfigure(7, weight=1)
         toolbar = ctk.CTkFrame(main)
         toolbar.grid(row=0, column=0, sticky="ew")
-        for text, command in (
-            ("New", self._new_project),
-            ("Open", self._open_project),
-            ("Save", self._save_project),
-            ("Add Clip", self._add_clip),
-            ("Remove", self._remove),
-            ("Move Left", lambda: self._move(-1)),
-            ("Move Right", lambda: self._move(1)),
-            ("Transcribe", self._transcribe),
-            ("Clear", self._clear),
-        ):
-            ctk.CTkButton(toolbar, text=text, width=86, command=command).pack(side="left", padx=3, pady=6)
+        toolbar_rows = (
+            ctk.CTkFrame(toolbar, fg_color="transparent"),
+            ctk.CTkFrame(toolbar, fg_color="transparent"),
+        )
+        for toolbar_row in toolbar_rows:
+            toolbar_row.pack(fill="x")
+        buttons = (
+            ("New", self._new_project, 78),
+            ("Open", self._open_project, 78),
+            ("Save", self._save_project, 78),
+            ("JSON", self._json_editor, 78),
+            ("Add Clip", self._add_clip, 78),
+            ("Remove", self._remove, 78),
+            ("Undo", self._undo, 78),
+            ("Redo", self._redo, 78),
+            ("Copy", self._copy, 78),
+            ("Paste", self._paste, 78),
+            ("Add Layer", self._add_layer, 78),
+            ("Layer Up", lambda: self._change_layer(1), 78),
+            ("Layer Down", lambda: self._change_layer(-1), 78),
+            ("Detach Audio", self._detach_audio, 96),
+            ("Move Left", lambda: self._move(-1), 78),
+            ("Move Right", lambda: self._move(1), 78),
+            ("Transcribe", self._transcribe, 78),
+            ("Clear", self._clear, 78),
+        )
+        for index, (text, command, width) in enumerate(buttons):
+            parent = toolbar_rows[0] if index < 9 else toolbar_rows[1]
+            ctk.CTkButton(parent, text=text, width=width, command=command).pack(
+                side="left", padx=2, pady=4
+            )
         self.total_label = ctk.CTkLabel(main, text="", anchor="w")
         self.total_label.grid(row=1, column=0, sticky="ew", padx=6, pady=(4, 2))
 
@@ -355,6 +447,61 @@ class TimelineView(ctk.CTkFrame):
         card.bind("<Double-Button-1>", lambda _event, item=path: self.app.open_path(item))
         self._cards[path] = card
 
+    def _shortcut(self, action: Any) -> str | None:
+        """Run a timeline shortcut unless a text field has focus."""
+        try:
+            focused = self.app.focus_get()
+        except tk.TclError:
+            focused = None
+        if isinstance(focused, (tk.Entry, tk.Text)):
+            return None
+        action()
+        return "break"
+
+    def _undo(self) -> None:
+        """Undo the last timeline edit."""
+        if not self.app.project.undo():
+            self._log("Nothing to undo.")
+            return
+        self.selected_index = None
+        self._log("Undo.")
+        self.app.refresh_views()
+
+    def _redo(self) -> None:
+        """Redo the last edit that was undone."""
+        if not self.app.project.redo():
+            self._log("Nothing to redo.")
+            return
+        self.selected_index = None
+        self._log("Redo.")
+        self.app.refresh_views()
+
+    def _copy(self) -> None:
+        """Copy the selected clip onto the clip clipboard."""
+        if self.selected_index is None:
+            self._log("Select a timeline clip first.")
+            return
+        try:
+            segment = self.app.project.copy_segment(self.selected_index)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot copy clip: {exc}")
+            return
+        self._log(f"Copied {segment.get('name', 'clip')}.")
+
+    def _paste(self) -> None:
+        """Paste the copied clip at the end of its lane."""
+        try:
+            segment = self.app.project.paste_segment()
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot paste clip: {exc}")
+            return
+        self.selected_index = self.app.project.timeline.index(segment)
+        self._log(
+            f"Pasted {segment.get('name', 'clip')} on "
+            f"{layer_label(int(segment.get('layer') or 0))}."
+        )
+        self.app.refresh_views()
+
     def _add_clips(self) -> None:
         """Ask for video files and add them to the media pool."""
         paths = filedialog.askopenfilenames(title="Add clips", filetypes=VIDEO_TYPES)
@@ -452,7 +599,7 @@ class TimelineView(ctk.CTkFrame):
                 return
             self._dragging = True
         if self.strip.over_strip(pointer_x, pointer_y):
-            self.strip.highlight_drop(self.strip.drop_index_at(pointer_x))
+            self.strip.highlight_drop(self.strip.drop_target(pointer_x, pointer_y))
         else:
             self.strip.highlight_drop(None)
 
@@ -468,13 +615,15 @@ class TimelineView(ctk.CTkFrame):
             self.strip.highlight_drop(None)
             self._select_pool(path)
             return
-        index = self.strip.drop_index_at(int(getattr(event, "x_root", 0)))
+        layer, index = self.strip.drop_target(
+            int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0))
+        )
         try:
-            segment = self.app.project.add_to_timeline(path, position=index)
+            segment = self.app.project.add_to_timeline(path, position=index, layer=layer)
         except (ValueError, OSError) as exc:
             self._log(f"Cannot drop on strip: {exc}")
             return
-        self._log(f"Dropped {segment['name']} at position {index + 1}.")
+        self._log(f"Dropped {segment['name']} on layer {layer}.")
         self.app.refresh_views()
 
     def _update_selection_ui(self) -> None:
@@ -617,6 +766,57 @@ class TimelineView(ctk.CTkFrame):
         self.selected_index = max(0, index + offset)
         self.app.refresh_views()
 
+    def _add_layer(self) -> None:
+        """Add an empty layer above the current ones."""
+        self._log(f"Added {layer_label(self.app.project.add_layer())}.")
+        self.app.refresh_views()
+
+    def _detach_audio(self, index: int | None = None) -> None:
+        """Move a clip's audio onto its own lane below the clip."""
+        target = self.selected_index if index is None else index
+        if target is None:
+            self._log("Select a timeline clip first.")
+            return
+        try:
+            segment, audio = self.app.project.detach_audio(target)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot separate audio: {exc}")
+            return
+        self.selected_index = self.app.project.timeline.index(segment)
+        self._log(
+            f"Separated the audio of {segment.get('name', 'clip')} onto "
+            f"{layer_label(audio['layer'])}."
+        )
+        self.app.refresh_views()
+
+    def _change_layer(self, offset: int) -> None:
+        """Move the selected clip up or down one layer."""
+        if self.selected_index is None:
+            self._log("Select a timeline clip first.")
+            return
+        timeline_items = self.app.project.timeline
+        if not 0 <= self.selected_index < len(timeline_items):
+            return
+        segment = timeline_items[self.selected_index]
+        target = int(segment.get("layer") or 0) + offset
+        if target < self.app.project.bottom_layer():
+            self._log("There is no lane below this one.")
+            return
+        self._send_to_layer(self.selected_index, target)
+
+    def _send_to_layer(self, index: int, layer: int) -> None:
+        """Move a clip to a layer, adding it when the layer is new."""
+        if layer > self.app.project.top_layer():
+            self.app.project.add_layer()
+        try:
+            segment = self.app.project.set_segment_layer(index, layer)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot move clip: {exc}")
+            return
+        self.selected_index = self.app.project.timeline.index(segment)
+        self._log(f"Moved {segment.get('name', 'clip')} to {layer_label(layer)}.")
+        self.app.refresh_views()
+
     def _new_project(self) -> None:
         """Start a fresh project with an empty pool and timeline."""
         self.app.project.media.clear()
@@ -655,6 +855,10 @@ class TimelineView(ctk.CTkFrame):
         if self._last_output:
             self.app.open_path(self._last_output)
 
+    def _json_editor(self) -> None:
+        """Open the project JSON in an editable window."""
+        JsonEditor(self, self.app, self.app.project)
+
     def _open_project(self) -> None:
         """Load a project file from disk."""
         path = filedialog.askopenfilename(title="Open project", filetypes=PROJECT_TYPES)
@@ -680,26 +884,22 @@ class TimelineView(ctk.CTkFrame):
             self._log("ffmpeg was not found, preview playback is unavailable.")
             return
         if start_index is not None:
-            spans = self._spans()
-            if 0 <= start_index < len(spans):
-                self._playhead = spans[start_index][0]
+            timeline_items = self.app.project.timeline
+            if 0 <= start_index < len(timeline_items):
+                self._playhead = float(timeline_items[start_index].get("abs_start") or 0.0)
         if self._playhead >= self._total_duration() - 0.05:
             self._playhead = 0.0
         self._play_start = self._playhead
         self._update_playhead_ui(self._playhead)
-        segments = self._range_from(self._playhead)
-        if not segments:
-            self._log("Nothing to play from this position.")
-            return
         if self.mute_var.get():
-            self._start_player(segments, None)
+            self._start_player(None)
             return
         self._preparing = True
         self._audio_ready = False
         self._prepared_audio = None
         self.play_button.configure(state="disabled", text="Prepare")
         self._log("Preparing preview audio...")
-        threading.Thread(target=self._prepare_audio, args=(segments,), daemon=True).start()
+        threading.Thread(target=self._prepare_audio, daemon=True).start()
         self.after(PREPARE_POLL_MS, self._poll_prepare)
 
     def _poll_prepare(self) -> None:
@@ -712,21 +912,24 @@ class TimelineView(ctk.CTkFrame):
         self._preparing = False
         audio_path = self._prepared_audio
         self._prepared_audio = None
-        self._start_player(self._range_from(self._playhead), audio_path)
+        self._start_player(audio_path)
 
-    def _prepare_audio(self, segments: list[dict]) -> None:
+    def _prepare_audio(self) -> None:
         """Render the preview audio track off the UI thread."""
         try:
-            self._prepared_audio = preview.audio_track(segments)
+            self._prepared_audio = preview.audio_track(
+                list(self.app.project.timeline), position=self._playhead
+            )
         except (OSError, ValueError):
             self._prepared_audio = None
         self._audio_ready = True
 
-    def _start_player(self, segments: list[dict], audio_path: Path | None) -> None:
+    def _start_player(self, audio_path: Path | None) -> None:
         """Start the embedded preview player at the current playhead."""
-        if not segments:
+        timeline_items = list(self.app.project.timeline)
+        if not timeline_items:
             return
-        self._player.load(segments)
+        self._player.load(timeline_items)
         muted = bool(self.mute_var.get()) or audio_path is None
         self._player.start(self._playhead, muted=muted, audio_path=audio_path)
         self._playing = True
@@ -781,14 +984,6 @@ class TimelineView(ctk.CTkFrame):
         self._audio_ready = False
         self.play_button.configure(state="normal", text="Play")
         self.stop_button.configure(state="disabled")
-
-    def _locate(self, position: float) -> tuple[int, float] | None:
-        """Return the segment index and offset for a timeline position."""
-        spans = self._spans()
-        for index, (start, end, _segment) in enumerate(spans):
-            if position < end - 1e-6 or index == len(spans) - 1:
-                return index, max(0.0, position - start)
-        return None
 
     def _on_operation_done(self, result: dict, op: Op | None = None) -> None:
         """Log the result of an operation run from the context menu."""
@@ -863,34 +1058,18 @@ class TimelineView(ctk.CTkFrame):
             return
         self.after(STILL_POLL_MS, self._poll_still)
 
-    def _range_from(self, position: float) -> list[dict]:
-        """Return the segments covering playback from a timeline position."""
-        located = self._locate(position)
-        if located is None:
-            return []
-        index, offset = located
-        spans = self._spans()
-        segments = [_segment_copy(spans[index][2], offset)]
-        segments += [
-            _segment_copy(segment) for _start, _end, segment in spans[index + 1 :]
-        ]
-        return segments
-
     def _request_still(self, position: float) -> None:
-        """Request a preview frame for a timeline position."""
-        located = self._locate(position)
-        if located is None:
+        """Request a composited preview frame for a timeline position."""
+        timeline_items = list(self.app.project.timeline)
+        if not timeline_items:
             return
-        index, offset = located
-        segment = self.app.project.timeline[index]
-        source_time = float(segment.get("start") or 0.0) + offset
         self._still_token += 1
         if not self._still_pending:
             self._still_pending = True
             self.after(STILL_POLL_MS, self._poll_still)
         threading.Thread(
             target=self._still_worker,
-            args=(self._still_token, str(segment.get("path")), source_time),
+            args=(self._still_token, timeline_items, position),
             daemon=True,
         ).start()
 
@@ -913,20 +1092,20 @@ class TimelineView(ctk.CTkFrame):
         self._display_image(image)
 
     def _spans(self) -> list[tuple[float, float, dict]]:
-        """Return each timeline segment with its start and end time."""
-        spans = []
-        position = 0.0
-        for segment in self.app.project.timeline:
-            length = max(
-                0.0, float(segment.get("end") or 0.0) - float(segment.get("start") or 0.0)
+        """Return each timeline segment with its layered start and end time."""
+        return [
+            (
+                float(segment.get("abs_start") or 0.0),
+                float(segment.get("abs_start") or 0.0)
+                + max(0.0, float(segment.get("end") or 0.0) - float(segment.get("start") or 0.0)),
+                segment,
             )
-            spans.append((position, position + length, segment))
-            position += length
-        return spans
+            for segment in self.app.project.timeline
+        ]
 
-    def _still_worker(self, token: int, path: str, source_time: float) -> None:
-        """Grab a still frame off the UI thread."""
-        image = preview.still_frame(path, source_time)
+    def _still_worker(self, token: int, segments: list[dict], position: float) -> None:
+        """Grab a composited still frame off the UI thread."""
+        image = preview.still_composite(segments, position)
         self._still_result = (token, image)
 
     def _stop_play(self) -> None:
@@ -957,10 +1136,7 @@ class TimelineView(ctk.CTkFrame):
 
     def _total_duration(self) -> float:
         """Return the total playable duration of the timeline."""
-        return sum(
-            max(0.0, float(item.get("end") or 0.0) - float(item.get("start") or 0.0))
-            for item in self.app.project.timeline
-        )
+        return self.app.project.timeline_duration()
 
     def _transcribe(self) -> None:
         """Start transcription of the timeline in a worker thread."""
@@ -1074,25 +1250,13 @@ class TimelineView(ctk.CTkFrame):
         self.out_var.set(f"{float(segment.get('end') or 0):.2f}")
         self.strip.select(index)
         if not self._playing and not self._preparing:
-            spans = self._spans()
-            if 0 <= index < len(spans):
-                self._seek_to(spans[index][0])
+            self._seek_to(float(segment.get("abs_start") or 0.0))
 
 
 def _duration_text(duration: float) -> str:
     """Format a duration in seconds as MM:SS."""
     total = int(max(0.0, float(duration or 0)))
     return f"{total // 60:02d}:{total % 60:02d}"
-
-
-def _segment_copy(segment: dict, offset: float = 0.0) -> dict:
-    """Copy a timeline segment, optionally moving its in point later."""
-    return {
-        "path": segment.get("path"),
-        "name": segment.get("name"),
-        "start": float(segment.get("start") or 0.0) + offset,
-        "end": float(segment.get("end") or 0.0),
-    }
 
 
 def _time_text(seconds: float) -> str:

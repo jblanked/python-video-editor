@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import context, paths, preview  # noqa: E402
 from tools.registry import find_op  # noqa: E402
 from views.app import VideoEditorApp  # noqa: E402
+from views.clip_strip import AUDIO_FG  # noqa: E402
 from views.op_form import OperationDialog  # noqa: E402
 from views.text_dialog import TextDialog  # noqa: E402
 
@@ -98,15 +99,29 @@ def exercise(app: VideoEditorApp) -> None:
     last_block = blocks[2]
     assert first_block.winfo_width() > 1, "clip blocks should be laid out"
 
-    # Reorder: drag the first block past the last one.
-    strip._begin_body_drag(SimpleNamespace(x_root=first_block.winfo_rootx() + 4), 0)
-    motion = SimpleNamespace(x_root=last_block.winfo_rootx() + last_block.winfo_width() - 2)
-    strip._body_drag_motion(motion)
-    assert strip._strip.pack_slaves()[2] is first_block, "dragged block should move to the end"
-    strip._end_body_drag(motion)
+    # Layers: add a layer, move a clip up and back, and confirm rows rebuild.
+    timeline._add_layer()
+    assert app.project.layer_count() == 2, app.project.layer_count()
+    timeline.refresh()
+    app.update()
+    assert len(strip._rows) == 2, f"expected two layer rows, got {len(strip._rows)}"
+    timeline._send_to_layer(0, 1)
+    on_top = [seg for seg in app.project.timeline if int(seg.get("layer") or 0) == 1]
+    assert len(on_top) == 1, "one clip should sit on layer 1"
+    timeline._send_to_layer(app.project.timeline.index(on_top[0]), 0)
+    assert all(int(seg.get("layer") or 0) == 0 for seg in app.project.timeline)
+
+    # Deterministic order for the menu checks: trimmed clip last.
+    app.project.clear_timeline()
+    app.project.add_to_timeline(SAMPLE_B)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.set_segment_range(2, start=0, end=2)
+    timeline.refresh()
+    app.update()
     order = [segment["path"] for segment in app.project.timeline]
     assert order == [SAMPLE_B, SAMPLE, SAMPLE], order
-    assert timeline.selected_index == 2, timeline.selected_index
+    timeline.selected_index = 2
 
     # Right-click menu: operation groups, clip actions, and wired commands.
     menu = timeline._build_context_menu(2)
@@ -118,7 +133,15 @@ def exercise(app: VideoEditorApp) -> None:
         entries[str(menu.entrycget(entry, "label"))] = (kind, entry)
     for group in ("Clip", "Transform", "Audio", "Overlay", "Export", "Info"):
         assert group in entries, f"context menu missing {group}: {list(entries)}"
-    for action in ("Preview from this clip", "Move Left", "Move Right", "Remove from timeline"):
+    for action in (
+        "Preview from this clip",
+        "Move Left",
+        "Move Right",
+        "Remove from timeline",
+        "Detach Audio",
+        "Add New Layer",
+        "Move to layer",
+    ):
         assert action in entries, f"context menu missing {action}"
     assert entries["Preview from this clip"][0] == "command"
     audio_menu = menu.nametowidget(str(menu.entrycget(entries["Audio"][1], "menu")))
@@ -140,7 +163,7 @@ def exercise(app: VideoEditorApp) -> None:
     timeline.refresh()
     app.update()
     strip = timeline.strip
-    block = strip._blocks[2]
+    block = strip._by_index[2]
     original_end = float(app.project.timeline[2]["end"])
     edge_x = block.winfo_rootx() + block.winfo_width() - 3
     pixels_per_second = strip._pixels_per_second
@@ -154,7 +177,7 @@ def exercise(app: VideoEditorApp) -> None:
     timeline.refresh()
     app.update()
     strip = timeline.strip
-    block = strip._blocks[2]
+    block = strip._by_index[2]
     edge_x = block.winfo_rootx() + block.winfo_width() - 3
     strip._begin_edge_drag(SimpleNamespace(x_root=edge_x), 2, "right")
     strip._edge_drag_motion(SimpleNamespace(x_root=edge_x + 4000))
@@ -253,6 +276,109 @@ def exercise(app: VideoEditorApp) -> None:
         assert abs(timeline._play_start - 1.0) < 0.05, timeline._play_start
     else:
         print("ffmpeg unavailable, skipping preview playback check")
+
+    # Detach Audio moves the clip audio onto its own lane below the clip.
+    app.project.clear_timeline()
+    app.project.layers = 1
+    app.project.add_to_timeline(SAMPLE_B)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.set_segment_range(0, start=0, end=1)
+    app.project.set_segment_range(1, start=0, end=1)
+    timeline.refresh()
+    app.update()
+    toolbar = timeline.video_label.master.master.winfo_children()[0]
+    toolbar_labels = [
+        str(button.cget("text"))
+        for row in toolbar.winfo_children()
+        for button in row.winfo_children()
+    ]
+    assert "Detach Audio" in toolbar_labels, toolbar_labels
+    for button in ("Undo", "Redo", "Copy", "Paste"):
+        assert button in toolbar_labels, (button, toolbar_labels)
+    for row in toolbar.winfo_children():
+        assert row.winfo_reqwidth() <= toolbar.winfo_width(), (
+            "toolbar row overflows",
+            row.winfo_reqwidth(),
+            toolbar.winfo_width(),
+        )
+        for button in row.winfo_children():
+            assert button.winfo_viewable(), f"hidden toolbar button: {button.cget('text')}"
+    timeline.selected_index = 1
+    timeline._detach_audio()
+    assert len(app.project.timeline) == 3, app.project.timeline
+    muted = app.project.timeline[1]
+    audio = app.project.timeline[2]
+    assert muted.get("mute") is True, muted
+    assert audio.get("kind") == "audio" and int(audio.get("layer") or 0) == -1, audio
+    assert abs(float(audio.get("abs_start") or 0.0) - 1.0) < 0.01, audio
+    assert app.project.layer_count() == 2, app.project.layer_count()
+    assert "Audio 1" in timeline.log.get("1.0", "end")
+    app.update()
+    assert len(strip._rows) == 2, f"expected a layer row and an audio row, got {len(strip._rows)}"
+    audio_block = strip._by_index[2]
+    assert audio_block.cget("fg_color") == AUDIO_FG, audio_block.cget("fg_color")
+    assert strip.drop_target(0, strip._strip.winfo_rooty() + 100)[0] == -1, "bottom row is the audio lane"
+    app.project.remove_segment(2)
+    app.project.timeline[1]["mute"] = False
+    app.project.clear_timeline()
+    app.project.add_to_timeline(SAMPLE_B)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.add_to_timeline(SAMPLE)
+    for index in range(3):
+        app.project.set_segment_range(index, start=0, end=1)
+    timeline.refresh()
+    app.update()
+
+    # Dragging a clip sideways slides it along its lane without changing length.
+    block = strip._by_index[0]
+    origin_x, origin_y = block.winfo_rootx() + 20, block.winfo_rooty() + 20
+    strip._begin_body_drag(SimpleNamespace(x_root=origin_x, y_root=origin_y), 0)
+    strip._body_drag_motion(SimpleNamespace(x_root=origin_x + 80, y_root=origin_y))
+    assert strip._drag_slide and strip._hover_layer is None, "a drag within one row should slide"
+    strip._end_body_drag(SimpleNamespace(x_root=origin_x + 80, y_root=origin_y))
+    shifted = app.project.timeline[0]
+    assert abs(float(shifted["lead"] or 0.0) - 2.0) < 0.2, shifted
+    assert abs(float(shifted["end"]) - float(shifted["start"]) - 1.0) < 0.01, shifted
+    timeline._undo()
+    assert abs(float(app.project.timeline[0]["lead"] or 0.0)) < 0.01, app.project.timeline[0]
+    timeline._redo()
+    assert abs(float(app.project.timeline[0]["lead"] or 0.0) - 2.0) < 0.2, app.project.timeline[0]
+    timeline.selected_index = 0
+    timeline._copy()
+    timeline._paste()
+    assert len(app.project.timeline) == 4, app.project.timeline
+    assert "Pasted" in timeline.log.get("1.0", "end")
+    timeline._undo()
+    assert len(app.project.timeline) == 3, app.project.timeline
+
+    # Dragging a clip onto another row moves it to that layer, even diagonally.
+    timeline._add_layer()
+    timeline.refresh()
+    app.update()
+    dragged = app.project.timeline[0]
+    block = strip._by_index[0]
+    start_x, start_y = block.winfo_rootx() + 20, block.winfo_rooty() + 20
+    target_y = strip._rows[1].winfo_rooty() + 20
+    strip._begin_body_drag(SimpleNamespace(x_root=start_x, y_root=start_y), 0)
+    strip._body_drag_motion(SimpleNamespace(x_root=start_x + 90, y_root=target_y))
+    assert strip._hover_layer == 1, strip._hover_layer
+    strip._end_body_drag(SimpleNamespace(x_root=start_x + 90, y_root=target_y))
+    assert int(dragged.get("layer") or 0) == 1, dragged
+    assert "to Layer 1" in timeline.log.get("1.0", "end")
+    timeline._undo()
+    assert all(int(segment.get("layer") or 0) == 0 for segment in app.project.timeline), (
+        app.project.timeline
+    )
+
+    app.project.clear_timeline()
+    app.project.layers = 1
+    app.project.add_to_timeline(SAMPLE_B)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.add_to_timeline(SAMPLE)
+    for index in range(3):
+        app.project.set_segment_range(index, start=0, end=1)
+    timeline.refresh()
+    app.update()
 
     # Add All To Timeline appends every pool clip in order.
     before = len(app.project.timeline)

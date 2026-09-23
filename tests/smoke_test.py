@@ -204,8 +204,46 @@ def test_timeline_ops(media: Path, out: Path) -> None:
     check("timeline_move_clip", execute_tool(
         "timeline_move_clip", {"index": 0, "new_index": 2}
     ), expect_output=False)
+    layered = execute_tool(
+        "timeline_add_clip",
+        {"path": str(media / "sample_b.mp4"), "start": "0", "end": "2", "layer": 1},
+    )
+    check("timeline_add_clip layer", layered, expect_output=False)
+    check("timeline_move_to_layer", execute_tool(
+        "timeline_move_to_layer", {"index": 0, "layer": 1}
+    ), expect_output=False)
+    assert any(int(segment.get("layer") or 0) == 1 for segment in project.timeline), (
+        "a clip should sit on layer 1"
+    )
+    detach_index = next(
+        index
+        for index, segment in enumerate(project.timeline)
+        if str(segment.get("path")) == str(media / "sample_a.mp4")
+    )
+    check("timeline_detach_audio", execute_tool(
+        "timeline_detach_audio", {"index": detach_index}
+    ), expect_output=False)
+    video_segment = project.timeline[detach_index]
+    audio_segment = project.timeline[detach_index + 1]
+    assert video_segment.get("mute") is True, video_segment
+    assert audio_segment.get("kind") == "audio", audio_segment
+    assert int(audio_segment.get("layer") or 0) == int(video_segment.get("layer") or 0) - 1, audio_segment
+    assert abs(
+        float(audio_segment.get("abs_start") or 0.0) - float(video_segment.get("abs_start") or 0.0)
+    ) < 0.01, (audio_segment, video_segment)
+    silent_index = next(
+        index
+        for index, segment in enumerate(project.timeline)
+        if str(segment.get("path")) == str(media / "sample_b.mp4")
+    )
+    silent = execute_tool("timeline_detach_audio", {"index": silent_index})
+    assert not silent["success"], "sample_b has no audio track to detach"
+    assert "no audio track" in str(silent.get("message")), silent
     render_path = out / "timeline_render.mp4"
     check("timeline_render", execute_tool("timeline_render", {"output": str(render_path)}))
+    check("timeline_move_to_layer back", execute_tool(
+        "timeline_move_to_layer", {"index": 0, "layer": 0}
+    ), expect_output=False)
     check("timeline_remove_clip", execute_tool("timeline_remove_clip", {"index": 0}), expect_output=False)
     check("timeline_clear", execute_tool("timeline_clear", {}), expect_output=False)
     assert len(project.timeline) == 0, "timeline should be empty after clear"
@@ -233,6 +271,76 @@ def test_transform_ops(media: Path, out: Path) -> None:
     check("reverse_video", execute_tool("reverse_video", {"path": str(short)}))
     check("fade_video", execute_tool("fade_video", {"path": str(sample), "fade_in": 1.0, "fade_out": 2.0}))
     check("blur_video", execute_tool("blur_video", {"path": str(sample), "strength": 8}))
+
+
+def test_detach_audio(media: Path, out: Path) -> None:
+    """Detach two clips onto one lane and confirm their audio stays in place."""
+    project = Project()
+    context.set_project(project)
+    project.add_to_timeline(media / "sample_a.mp4", 0, 1)
+    project.add_to_timeline(media / "sample_b.mp4", 0, 1)
+    project.add_to_timeline(media / "sample_a.mp4", 0, 1)
+    project.detach_audio(0)
+    project.detach_audio(3)
+    lanes = {int(segment.get("layer") or 0) for segment in project.timeline}
+    assert lanes == {-1, 0}, lanes
+    for index, segment in enumerate(project.timeline):
+        if segment.get("kind") != "audio":
+            continue
+        partner = project.timeline[index - 1]
+        assert partner.get("mute") is True, partner
+        assert abs(float(segment["abs_start"]) - float(partner["abs_start"])) < 0.01, (
+            segment,
+            partner,
+        )
+    unmuted = [
+        index
+        for index, segment in enumerate(project.timeline)
+        if segment.get("kind") != "audio" and not segment.get("mute")
+    ]
+    assert len(unmuted) == 1, unmuted
+    assert str(project.timeline[unmuted[0]].get("path")) == str(media / "sample_b.mp4"), (
+        "only the clip without audio stays unmuted"
+    )
+    render_path = out / "detached_audio.mp4"
+    check("detach audio render", execute_tool("timeline_render", {"output": str(render_path)}))
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-i", str(render_path),
+            "-af", "silencedetect=n=-40dB:d=0.2", "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    gaps = [
+        line.strip()
+        for line in result.stderr.splitlines()
+        if "silence_start" in line or "silence_end" in line
+    ]
+    assert len(gaps) == 2, f"only the middle clip should be silent: {gaps}"
+    start = float(gaps[0].split("silence_start:")[1])
+    end = float(gaps[1].split("silence_end:")[1].split("|")[0])
+    assert abs(start - 1.0) < 0.1 and abs(end - 2.0) < 0.1, gaps
+    print("[ok ] detached audio keeps its timeline position")
+
+
+def test_history_and_move(media: Path, out: Path) -> None:
+    """Exercise undo/redo, the clip clipboard, and sliding a clip along its lane."""
+    project = Project()
+    context.set_project(project)
+    project.add_to_timeline(media / "sample_a.mp4", 0, 1)
+    project.add_to_timeline(media / "sample_b.mp4", 0, 1)
+    moved = project.set_segment_lead(1, 2.0)
+    assert abs(float(moved["abs_start"]) - 3.0) < 0.01, moved
+    assert abs(float(project.timeline[0]["abs_start"])) < 0.01, "the first clip should stay put"
+    assert project.undo() and abs(float(project.timeline[1]["abs_start"]) - 1.0) < 0.01
+    assert project.redo() and abs(float(project.timeline[1]["abs_start"]) - 3.0) < 0.01
+    project.copy_segment(0)
+    pasted = project.paste_segment()
+    assert len(project.timeline) == 3 and pasted["kind"] == "video", pasted
+    assert project.undo() and len(project.timeline) == 2, "paste should be undoable"
+    assert not Project().undo(), "an empty project has nothing to undo"
+    print("[ok ] undo, redo, clipboard and clip move")
 
 
 def test_dispatch_errors(media: Path) -> None:
@@ -273,6 +381,8 @@ def main() -> int:
         test_overlay_ops(media)
         test_export_ops(media, out)
         test_timeline_ops(media, out)
+        test_detach_audio(media, out)
+        test_history_and_move(media, out)
         test_dispatch_errors(media)
     finally:
         context.set_project(None)

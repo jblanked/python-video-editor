@@ -41,10 +41,15 @@ python main.py
   horizontal strip of clips with an embedded preview player. Add media to the
   pool with thumbnails, preview a clip, and add it to the timeline, or add
   the whole pool in order, or drag a pool card straight onto the strip. Drag
-  clips to reorder, drag their edges to trim, double-click to preview from a
-  clip, zoom the strip, drag the playhead to start anywhere, and play with the
-  button or the space bar. Right-click a clip for every operation that applies
-  to it. Projects can be saved and the sequence rendered into one file.
+  a clip sideways to slide it along its lane without changing its length, drag it
+  up or down to move it onto another layer, and drag its edges to trim. Detach
+  Audio moves a clip's sound onto its own lane below the clip so it can be moved
+  and trimmed on its own. Undo and redo (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z) cover
+  every edit, and Copy/Paste (Cmd/Ctrl+C, Cmd/Ctrl+V) duplicates a clip onto its
+  lane. Double-click to preview from a clip, zoom the strip, drag the playhead
+  to start anywhere, and play with the button or the space bar. Right-click a
+  clip for every operation that applies to it. Projects can be saved and the
+  sequence rendered into one file.
 - **AI Assistant** - describe an edit in chat and the assistant runs the
   editor's operations, for example "trim the first clip to five seconds and
   add a fade" or "remove all white space from the timeline". Ctrl+Enter sends,
@@ -61,7 +66,7 @@ Trim, cut, split and join clips; resize, crop, rotate, flip, change speed,
 reverse, fade and blur; adjust volume, mute, extract and add audio; add text,
 subtitles and watermarks; convert formats, make GIFs, thumbnails and frame
 dumps; and edit the timeline (add, trim, move, remove, clear, render,
-transcribe, remove silence). Times accept seconds, `MM:SS` or `HH:MM:SS`.
+transcribe, remove silence, detach audio). Times accept seconds, `MM:SS` or `HH:MM:SS`.
 
 ## Settings
 

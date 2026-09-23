@@ -672,6 +672,62 @@ OPS: tuple[Op, ...] = (
             Param(name="start", type="time", description="Timeline in point.", label="In"),
             Param(name="end", type="time", description="Timeline out point.", label="Out"),
             Param(name="position", type="integer", description="Timeline index to insert at."),
+            Param(
+                name="layer",
+                type="integer",
+                description="Layer to place the clip on; 0 is the base, higher layers sit on top.",
+                default=0,
+                label="Layer",
+            ),
+        ),
+        scope="timeline",
+        output_kind="none",
+    ),
+    Op(
+        name="timeline_move_to_layer",
+        label="Move clip to layer",
+        group="Timeline",
+        description=(
+            "Move a timeline clip onto another layer. Higher layers are drawn over lower "
+            "ones, so the topmost clip at any moment is the one seen."
+        ),
+        function=timeline_ops.timeline_move_to_layer,
+        params=(
+            Param(
+                name="index",
+                type="integer",
+                description="Timeline clip index.",
+                required=True,
+                label="Index",
+            ),
+            Param(
+                name="layer",
+                type="integer",
+                description="Target layer; 0 is the base, higher layers sit on top.",
+                required=True,
+                label="Layer",
+            ),
+        ),
+        scope="timeline",
+        output_kind="none",
+    ),
+    Op(
+        name="timeline_detach_audio",
+        label="Detach audio",
+        group="Timeline",
+        description=(
+            "Move a timeline clip's audio onto its own lane underneath the clip, so the audio "
+            "can be moved and trimmed on its own. The clip keeps playing without its audio."
+        ),
+        function=timeline_ops.timeline_detach_audio,
+        params=(
+            Param(
+                name="index",
+                type="integer",
+                description="Timeline clip index.",
+                required=True,
+                label="Index",
+            ),
         ),
         scope="timeline",
         output_kind="none",

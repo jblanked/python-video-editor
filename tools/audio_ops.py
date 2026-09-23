@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from tools import composite
 from tools import ffmpeg_utils as ff
 from tools.results import ensure_file, error_result, success_result
 
@@ -116,41 +117,21 @@ def render_audio_range(
     codec_args: list[str] | None = None,
     sample_rate: int = 44100,
     channels: int = 2,
+    offset: float = 0.0,
 ) -> Path | None:
-    """Render trimmed timeline segments into one audio file; None when silent."""
-    parts: list[str] = []
-    labels: list[str] = []
-    args: list[str] = []
-    has_audio = False
-    layout = "stereo" if channels >= 2 else "mono"
-    for index, segment in enumerate(segments):
-        start = float(segment.get("start") or 0.0)
-        end = float(segment.get("end") or 0.0)
-        length = end - start
-        if length <= 0.05:
-            continue
-        info = _probe(segment.get("path"))
-        args += ["-i", str(segment.get("path"))]
-        if info and ff.has_audio(info):
-            has_audio = True
-            parts.append(
-                f"[{index}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
-                f"aresample={sample_rate},"
-                f"aformat=sample_fmts=s16:channel_layouts={layout}[a{index}]"
-            )
-        else:
-            parts.append(
-                f"anullsrc=channel_layout={layout}:sample_rate={sample_rate}:"
-                f"d={length:.3f}[a{index}]"
-            )
-        labels.append(f"[a{index}]")
-    if not parts or not has_audio:
+    """Mix layered timeline segments into one audio file; None when silent."""
+    try:
+        ordered, _total_time, sources = composite.layout(segments, offset=offset)
+    except (ValueError, OSError):
         return None
-    graph = (
-        ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(labels)}:v=0:a=1[a]"
-    )
+    parts, label = composite.audio_graph(ordered, sample_rate, channels)
+    if label is None:
+        return None
+    args: list[str] = []
+    for source in sources:
+        args += ["-i", source]
+    args += ["-filter_complex", ";".join(parts), "-map", f"[{label}]"]
     target = _prepare_output(output)
-    args += ["-filter_complex", graph, "-map", "[a]"]
     args += codec_args or ["-c:a", "pcm_s16le"]
     args.append(str(target))
     ok, _ = ff.run_ffmpeg(args)

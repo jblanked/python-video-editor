@@ -25,7 +25,9 @@ use the file tools for one-off edits that produce new files. Call get_video_info
 about a clip and timeline_get_state before editing the timeline. Use transcribe_timeline to
 read the timeline script, order clips by what was said, and find silence ranges or script duplicates to trim
 away; transcribe_clip does the same for a single file. Call timeline_remove_silence to cut
-every silent gap out of the timeline in one step. Time values accept seconds,
+every silent gap out of the timeline in one step. Call timeline_detach_audio to move a clip's
+audio onto its own lane underneath the clip when it should be trimmed or moved separately.
+Time values accept seconds,
 MM:SS, or HH:MM:SS. After an edit, report the output file path. Keep replies short and
 practical, and use tools instead of guessing."
 """

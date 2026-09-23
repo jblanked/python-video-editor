@@ -14,20 +14,55 @@ MIN_SPEECH_SECONDS = 0.2
 
 
 def timeline_add_clip(
-    path: str | Path, start: Any = None, end: Any = None, position: Any = None
+    path: str | Path,
+    start: Any = None,
+    end: Any = None,
+    position: Any = None,
+    layer: Any = 0,
 ) -> dict:
-    """Add a clip to the editor timeline at a position, with optional in and out points."""
+    """Add a clip to the editor timeline at a position, on a layer."""
     project = _require_project()
     if project is None:
         return error_result("No project is open.")
     try:
-        segment = project.add_to_timeline(path, start=start, end=end, position=position)
+        layer_index = max(0, int(layer or 0))
+    except (TypeError, ValueError):
+        return error_result("Layer must be a whole number.")
+    try:
+        segment = project.add_to_timeline(
+            path, start=start, end=end, position=position, layer=layer_index
+        )
     except (ValueError, OSError) as exc:
         return error_result(str(exc))
     return success_result(
         None,
         f"Added {segment['name']} to the timeline at index {project.timeline.index(segment)}.",
         index=project.timeline.index(segment),
+        layer=layer_index,
+        segment=segment,
+    )
+
+
+def timeline_move_to_layer(index: Any, layer: Any) -> dict:
+    """Move a timeline clip onto another layer."""
+    project = _require_project()
+    if project is None:
+        return error_result("No project is open.")
+    try:
+        target = max(0, int(layer))
+    except (TypeError, ValueError):
+        return error_result("Layer must be a whole number.")
+    if target >= project.layer_count():
+        project.add_layer()
+    try:
+        segment = project.set_segment_layer(index, target)
+    except (ValueError, OSError) as exc:
+        return error_result(str(exc))
+    return success_result(
+        None,
+        f"Moved {segment['name']} to layer {target}.",
+        index=project.timeline.index(segment),
+        layer=target,
         segment=segment,
     )
 
@@ -129,6 +164,24 @@ def timeline_render(
     if project is None:
         return error_result("No project is open.")
     return project.render(output, width=width, height=height, fps=fps)
+
+
+def timeline_detach_audio(index: Any) -> dict:
+    """Move a timeline clip's audio onto its own lane below the clip."""
+    project = _require_project()
+    if project is None:
+        return error_result("No project is open.")
+    try:
+        segment, audio = project.detach_audio(index)
+    except (ValueError, OSError) as exc:
+        return error_result(str(exc))
+    return success_result(
+        None,
+        f"Separated the audio of {segment['name']} onto layer {audio['layer']}.",
+        index=project.timeline.index(audio),
+        layer=audio["layer"],
+        segment=audio,
+    )
 
 
 def timeline_trim_clip(index: Any, start: Any = None, end: Any = None) -> dict:
