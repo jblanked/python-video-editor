@@ -37,8 +37,10 @@ python main.py
 
 ## Features
 
-- **Timeline** - the single editor view: a media pool on the left and a
-  horizontal strip of clips with an embedded preview player. Add media to the
+- **Timeline** - the single editor view: a media pool panel on the right (drag its
+  divider to resize it, click the arrow on the divider to hide it) and a
+  horizontal strip of clips with an embedded preview player. Scroll the strip sideways
+  with the wheel or trackpad, and zoom it with the Zoom menu. Add media to the
   pool with thumbnails, preview a clip, and add it to the timeline, or add
   the whole pool in order, or drag a pool card straight onto the strip. Drag
   a clip sideways to slide it along its lane without changing its length, drag it

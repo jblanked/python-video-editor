@@ -389,6 +389,46 @@ def exercise(app: VideoEditorApp) -> None:
     assert added == pool_paths, added
     assert "Added" in timeline.log.get("1.0", "end")
 
+    # The pool sits on the right of the timeline, resizes, and can be hidden.
+    main_frame = timeline.video_label.master.master
+    start_width = timeline._pool_width
+    assert int(timeline.pool.grid_info()["column"]) == 2, timeline.pool.grid_info()
+    assert int(main_frame.grid_info()["column"]) == 0, main_frame.grid_info()
+    assert timeline.pool.winfo_x() > main_frame.winfo_x(), "the pool should be on the right"
+    timeline._pool_resize_start(SimpleNamespace(x_root=1000))
+    timeline._pool_resize_motion(SimpleNamespace(x_root=900))
+    timeline._pool_resize_end()
+    assert timeline._pool_width == start_width + 100, timeline._pool_width
+    timeline._toggle_pool()
+    app.update()
+    assert timeline._pool_hidden and not timeline.pool.winfo_ismapped()
+    assert main_frame.winfo_width() > 0
+    timeline._toggle_pool()
+    app.update()
+    assert timeline.pool.winfo_ismapped(), "the pool should come back"
+    assert app.bind_all("<MouseWheel>"), "the strip should bind the wheel"
+
+    # The strip scrolls sideways with the wheel or trackpad.
+    timeline._set_pool_width(900)
+    strip.set_zoom(80)
+    app.update()
+    canvas = strip._strip._parent_canvas
+    canvas.xview_moveto(1.0)
+    before = canvas.xview()[0]
+    assert before > 0.1, f"strip content should be wider than the view: {before}"
+    timeline._scroll_strip(-1)
+    assert canvas.xview()[0] < before, canvas.xview()
+    original_pointer = timeline.winfo_pointerxy
+    timeline.winfo_pointerxy = lambda: (strip.winfo_rootx() + 40, strip.winfo_rooty() + 30)
+    assert timeline._on_wheel(SimpleNamespace(delta=1, num="")) == "break"
+    assert canvas.xview()[0] > 0.0, "the wheel should scroll the strip"
+    timeline.winfo_pointerxy = lambda: (timeline.pool.winfo_rootx() + 20, timeline.pool.winfo_rooty() + 20)
+    assert timeline._on_wheel(SimpleNamespace(delta=1, num="")) is None, "outside the strip"
+    timeline.winfo_pointerxy = original_pointer
+    strip.set_zoom(40)
+    timeline._set_pool_width(start_width)
+    app.update()
+
     # A finished agent tool run refreshes the other views.
     assistant._show_event(
         {"type": "tool_end", "name": "timeline_remove_silence", "result": {"success": True, "message": "Removed 1.0s of silence."}}

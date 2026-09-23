@@ -125,9 +125,16 @@ class TimelineView(ctk.CTkFrame):
         self._still_pending = False
         self._updating_playhead = False
         self._transcribing = False
+        self._pool_width = 360
+        self._pool_hidden = False
+        self._pool_drag_x: int | None = None
+        self._pool_drag_width = self._pool_width
+        self.pool: ctk.CTkFrame | None = None
         self._build_ui()
         self.refresh()
         self.app.bind_all("<space>", self._on_space)
+        for sequence in ("<MouseWheel>", "<Shift-MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.app.bind_all(sequence, self._on_wheel)
         for sequence in ("<Command-z>", "<Control-z>"):
             self.app.bind_all(sequence, lambda _event: self._shortcut(self._undo))
         for sequence in ("<Command-Shift-Z>", "<Command-Shift-z>", "<Control-Shift-Z>"):
@@ -236,14 +243,16 @@ class TimelineView(ctk.CTkFrame):
         return menu
 
     def _build_ui(self) -> None:
-        """Create the pool panel and the timeline editor area."""
-        self.columnconfigure(0, weight=2)
-        self.columnconfigure(1, weight=3)
+        """Create the timeline editor area and the media pool beside it."""
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=0)
+        self.columnconfigure(2, weight=0)
         self.rowconfigure(0, weight=1)
         self._build_pool()
+        self._build_divider()
 
         main = ctk.CTkFrame(self)
-        main.grid(row=0, column=1, sticky="nsew")
+        main.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         main.columnconfigure(0, weight=1)
         main.rowconfigure(7, weight=1)
         toolbar = ctk.CTkFrame(main)
@@ -364,8 +373,10 @@ class TimelineView(ctk.CTkFrame):
 
     def _build_pool(self) -> None:
         """Create the media pool panel with its toolbar and cards."""
-        pool = ctk.CTkFrame(self)
-        pool.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        pool = ctk.CTkFrame(self, width=self._pool_width)
+        pool.grid(row=0, column=2, sticky="nsew")
+        pool.grid_propagate(False)
+        self.pool = pool
         pool.columnconfigure(0, weight=1)
         pool.rowconfigure(2, weight=1)
         toolbar = ctk.CTkFrame(pool)
@@ -393,6 +404,74 @@ class TimelineView(ctk.CTkFrame):
             text_color=("gray40", "gray60"),
         )
         hint.grid(row=3, column=0, sticky="w", padx=10, pady=(4, 2))
+
+    def _build_divider(self) -> None:
+        """Create the draggable divider that resizes and hides the pool."""
+        bar = ctk.CTkFrame(self, width=14, fg_color="transparent", cursor="sb_h_double_arrow")
+        bar.grid(row=0, column=1, sticky="ns")
+        bar.grid_propagate(False)
+        self._pool_toggle = ctk.CTkButton(bar, text="\u203a", width=12, height=30, command=self._toggle_pool)
+        self._pool_toggle.place(relx=0.5, y=10, anchor="n")
+        for widget in (bar, self._pool_toggle):
+            widget.bind("<Button-1>", self._pool_resize_start)
+            widget.bind("<B1-Motion>", self._pool_resize_motion)
+            widget.bind("<ButtonRelease-1>", self._pool_resize_end)
+
+    def _toggle_pool(self) -> None:
+        """Show or hide the media pool panel."""
+        if self.pool is None or not self.pool.winfo_exists():
+            return
+        self._pool_hidden = not self._pool_hidden
+        if self._pool_hidden:
+            self.pool.grid_remove()
+        else:
+            self.pool.grid()
+        self._pool_toggle.configure(text="\u2039" if self._pool_hidden else "\u203a")
+
+    def _pool_resize_start(self, event: Any) -> None:
+        """Begin dragging the divider to resize the pool."""
+        self._pool_drag_x = int(getattr(event, "x_root", 0))
+        self._pool_drag_width = self._pool_width
+
+    def _pool_resize_motion(self, event: Any) -> None:
+        """Resize the pool while the divider is dragged."""
+        if self._pool_drag_x is None:
+            return
+        delta = int(getattr(event, "x_root", 0)) - self._pool_drag_x
+        self._set_pool_width(self._pool_drag_width - delta)
+
+    def _pool_resize_end(self, _event: Any = None) -> None:
+        """Stop resizing the pool."""
+        self._pool_drag_x = None
+        self._pool_drag_width = self._pool_width
+
+    def _set_pool_width(self, width: int) -> None:
+        """Clamp and apply a new pool width."""
+        self._pool_width = int(min(max(220, width), 900))
+        if self.pool is not None and self.pool.winfo_exists():
+            self.pool.configure(width=self._pool_width)
+
+    def _scroll_strip(self, step: int) -> None:
+        """Scroll the clip strip sideways by whole units."""
+        canvas = getattr(self.strip._strip, "_parent_canvas", None)
+        if canvas is not None:
+            canvas.xview_scroll(step, "units")
+
+    def _on_wheel(self, event: Any) -> str | None:
+        """Scroll the clip strip with the wheel or trackpad when over it."""
+        if not self.strip.winfo_ismapped():
+            return None
+        if not self.strip.over_strip(*self.winfo_pointerxy()):
+            return None
+        delta = int(getattr(event, "delta", 0) or 0)
+        button = str(getattr(event, "num", "") or "")
+        if delta:
+            self._scroll_strip(-1 if delta > 0 else 1)
+        elif button in {"4", "5"}:
+            self._scroll_strip(-1 if button == "4" else 1)
+        else:
+            return None
+        return "break"
 
     def _refresh_pool(self) -> None:
         """Rebuild the media pool cards from the project media list."""
