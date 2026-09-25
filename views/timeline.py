@@ -236,6 +236,7 @@ class TimelineView(ctk.CTkFrame):
             )
         menu.add_cascade(label="Move to layer", menu=layer_menu)
         menu.add_command(label="Preview from this clip", command=lambda: self._play(start_index=index))
+        menu.add_command(label="Cut at playhead", command=lambda: self._cut_at(self._playhead))
         menu.add_command(label="Move Left", command=lambda: self._move_clip(index, -1))
         menu.add_command(label="Move Right", command=lambda: self._move_clip(index, 1))
         menu.add_separator()
@@ -257,37 +258,66 @@ class TimelineView(ctk.CTkFrame):
         main.rowconfigure(7, weight=1)
         toolbar = ctk.CTkFrame(main)
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar_rows = (
-            ctk.CTkFrame(toolbar, fg_color="transparent"),
-            ctk.CTkFrame(toolbar, fg_color="transparent"),
+        toolbar_row = ctk.CTkFrame(toolbar, fg_color="transparent")
+        toolbar_row.pack(fill="x")
+
+        self.file_menu = tk.Menu(self, tearoff=0)
+        for label, command in (
+            ("New", self._new_project),
+            ("Open", self._open_project),
+            ("Save", self._save_project),
+        ):
+            self.file_menu.add_command(label=label, command=command)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="JSON", command=self._json_editor)
+
+        self.edit_menu = tk.Menu(self, tearoff=0)
+        for label, command in (
+            ("Undo", self._undo),
+            ("Redo", self._redo),
+            ("Copy", self._copy),
+            ("Paste", self._paste),
+        ):
+            self.edit_menu.add_command(label=label, command=command)
+        self.edit_menu.add_separator()
+        for label, command in (
+            ("Remove", self._remove),
+            ("Move Left", lambda: self._move(-1)),
+            ("Move Right", lambda: self._move(1)),
+            ("Add Layer", self._add_layer),
+            ("Layer Up", lambda: self._change_layer(1)),
+            ("Layer Down", lambda: self._change_layer(-1)),
+            ("Detach Audio", self._detach_audio),
+            ("Transcribe", self._transcribe),
+            ("Clear", self._clear),
+        ):
+            self.edit_menu.add_command(label=label, command=command)
+
+        file_button = ctk.CTkButton(
+            toolbar_row,
+            text="File \u25be",
+            width=52,
+            command=lambda: self.file_menu.tk_popup(
+                file_button.winfo_rootx(),
+                file_button.winfo_rooty() + file_button.winfo_height() + 2,
+            ),
         )
-        for toolbar_row in toolbar_rows:
-            toolbar_row.pack(fill="x")
-        buttons = (
-            ("New", self._new_project, 78),
-            ("Open", self._open_project, 78),
-            ("Save", self._save_project, 78),
-            ("JSON", self._json_editor, 78),
-            ("Add Clip", self._add_clip, 78),
-            ("Remove", self._remove, 78),
-            ("Undo", self._undo, 78),
-            ("Redo", self._redo, 78),
-            ("Copy", self._copy, 78),
-            ("Paste", self._paste, 78),
-            ("Add Layer", self._add_layer, 78),
-            ("Layer Up", lambda: self._change_layer(1), 78),
-            ("Layer Down", lambda: self._change_layer(-1), 78),
-            ("Detach Audio", self._detach_audio, 96),
-            ("Move Left", lambda: self._move(-1), 78),
-            ("Move Right", lambda: self._move(1), 78),
-            ("Transcribe", self._transcribe, 78),
-            ("Clear", self._clear, 78),
+        file_button.pack(side="left", padx=(2, 2), pady=4)
+        edit_button = ctk.CTkButton(
+            toolbar_row,
+            text="Edit \u25be",
+            width=52,
+            command=lambda: self.edit_menu.tk_popup(
+                edit_button.winfo_rootx(),
+                edit_button.winfo_rooty() + edit_button.winfo_height() + 2,
+            ),
         )
-        for index, (text, command, width) in enumerate(buttons):
-            parent = toolbar_rows[0] if index < 9 else toolbar_rows[1]
-            ctk.CTkButton(parent, text=text, width=width, command=command).pack(
-                side="left", padx=2, pady=4
-            )
+        edit_button.pack(side="left", padx=2, pady=4)
+        ctk.CTkButton(toolbar_row, text="Add Clip", width=78, command=self._add_clip).pack(
+            side="left", padx=2, pady=4
+        )
+        self.cut_button = ctk.CTkButton(toolbar_row, text="Cut", width=40, command=self._toggle_cut)
+        self.cut_button.pack(side="left", padx=2, pady=4)
         self.total_label = ctk.CTkLabel(main, text="", anchor="w")
         self.total_label.grid(row=1, column=0, sticky="ew", padx=6, pady=(4, 2))
 
@@ -340,6 +370,7 @@ class TimelineView(ctk.CTkFrame):
             on_change=self._on_strip_change,
             on_play=self._on_strip_play,
             on_context=self._on_strip_context,
+            on_cut=self._on_cut,
         )
         self.strip.pack(side="left", fill="x", expand=True)
 
@@ -1284,6 +1315,53 @@ class TimelineView(ctk.CTkFrame):
             return
         self._log(f"Removed {segment.get('name', 'clip')} from the timeline.")
         self.selected_index = None
+        self.app.refresh_views()
+
+    def _toggle_cut(self) -> None:
+        """Toggle the cut tool: click the strip to split a clip at the playhead."""
+        if self.strip is None:
+            return
+        if getattr(self, "_cut_active", False):
+            self.strip.disable_cut_mode()
+            if hasattr(self, "cut_button"):
+                self.cut_button.configure(text="Cut")
+            self._cut_active = False
+            self._log("Cut tool off.")
+        else:
+            self.strip.enable_cut_mode()
+            if hasattr(self, "cut_button"):
+                self.cut_button.configure(text="Cutting...")
+            self._cut_active = True
+            self._log("Cut tool on - click the timeline to split a clip.")
+
+    def _on_cut(self, position: float) -> None:
+        """Handle a cut click from the strip: split the clip under the playhead."""
+        self.strip.disable_cut_mode()
+        if hasattr(self, "cut_button"):
+            self.cut_button.configure(text="Cut")
+        self._cut_active = False
+        self._cut_at(position)
+
+    def _cut_at(self, position: float) -> None:
+        """Split the clip under the cut point into two."""
+        if self.strip is None or not self.app.project.timeline:
+            self._log("Add clips to the timeline before cutting.")
+            return
+        total = self._total_duration()
+        position = max(0.0, min(float(position), total))
+        segment = self.app.project.segment_at_time(position)
+        if segment is None:
+            self._log("The cut point is not on any clip.")
+            return
+        index = self.app.project.timeline.index(segment)
+        try:
+            first, second = self.app.project.split_segment_at(index, position)
+        except (ValueError, OSError) as exc:
+            self._log(f"Cannot cut clip: {exc}")
+            return
+        self.selected_index = self.app.project.timeline.index(second)
+        name = segment.get("name", "clip")
+        self._log(f"Cut {name} at {position:.2f}s into two clips.")
         self.app.refresh_views()
 
     def _render(self) -> None:

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import gettempdir
+import threading
+
 from typing import Any, Callable
 
 import customtkinter as ctk
+from PIL import Image, ImageOps
 
 from tools import ffmpeg_utils as ff
+from tools import export_ops
 from tools.project import layer_label
 
-BLOCK_HEIGHT = 64
+BLOCK_HEIGHT = 78
 ROW_GAP = 8
 ROW_STRIDE = BLOCK_HEIGHT + ROW_GAP
 LABEL_WIDTH = 72
@@ -21,11 +27,16 @@ SCROLL_EDGE = 26
 SCROLL_UNITS = 1
 DEFAULT_ZOOM = 40
 ZOOM_LEVELS = (10, 20, 40, 80)
+THUMB_H = 34
+THUMB_W = 56
+THUMB_DIR = Path(gettempdir()) / "video_editor_strip_thumbs"
+THUMB_POLL_MS = 150
 DRAG_FG = ("#DCE4EE", "#343B44")
 ACCENT = ("#3B8ED0", "#1F6AA5")
 HANDLE_FG = ("#AAB4BF", "#4A5560")
 PLAYHEAD_FG = "#E05C5C"
 LABEL_FG = ("#E8EAED", "#2B2D31")
+LABEL_DIM = ("#AAB4BF", "#4A5560")
 AUDIO_FG = ("#2F6F6B", "#24544F")
 
 
@@ -40,6 +51,7 @@ class ClipStrip(ctk.CTkFrame):
         on_change: Callable[[str, int | None], None],
         on_play: Callable[[int], None] | None = None,
         on_context: Callable[[int, Any], None] | None = None,
+        on_cut: Callable[[float], None] | None = None,
     ) -> None:
         """Create the layered board, its rows, and the playhead line."""
         super().__init__(master, fg_color="transparent")
@@ -48,11 +60,13 @@ class ClipStrip(ctk.CTkFrame):
         self._on_change = on_change
         self._on_play = on_play
         self._on_context = on_context
+        self._on_cut = on_cut
         self._pixels_per_second = float(DEFAULT_ZOOM)
         self._blocks: list[ctk.CTkFrame] = []
         self._by_index: dict[int, ctk.CTkFrame] = {}
         self._rows: dict[int, ctk.CTkFrame] = {}
         self._durations: dict[str, float] = {}
+        self._bitmaps: dict[str, Image.Image | None] = {}
         self._selected: int | None = None
         self._playhead = 0.0
         self._empty_label: ctk.CTkLabel | None = None
@@ -69,6 +83,9 @@ class ClipStrip(ctk.CTkFrame):
         self._drag_slide = False
         self._drag_moved = False
         self._drop_target: tuple[int, int] | None = None
+        self._cut_mode = False
+        self._cut_done = False
+        self._cut_position = 0.0
         self._strip = ctk.CTkScrollableFrame(
             self, orientation="horizontal", height=BLOCK_HEIGHT + ROW_GAP + 26
         )
@@ -82,6 +99,15 @@ class ClipStrip(ctk.CTkFrame):
         self._drop_marker = ctk.CTkFrame(
             self._board, width=3, height=BLOCK_HEIGHT, fg_color=ACCENT
         )
+        self._cut_overlay = ctk.CTkFrame(self._board, fg_color="transparent")
+        self._cut_blade = ctk.CTkFrame(
+            self._cut_overlay, width=2, height=BLOCK_HEIGHT, fg_color="#FFB020"
+        )
+        self._cut_overlay.place_forget()
+        self._cut_blade.place_forget()
+        self._cut_overlay.bind("<Motion>", self._cut_motion)
+        self._cut_overlay.bind("<Button-1>", self._strip_click)
+        self._thumb_busy = False
         self.refresh()
 
     def refresh(self) -> None:
@@ -138,11 +164,87 @@ class ClipStrip(ctk.CTkFrame):
         self._drop_marker.lift()
         self._apply_selection()
         self.set_playhead(self._playhead)
+        if self._cut_mode:
+            self._place_overlay()
+        self._show_cut_blade()
+        self._start_thumbs()
 
     def select(self, index: int | None) -> None:
         """Highlight the block that matches a timeline index."""
         self._selected = index
         self._apply_selection()
+
+    def enable_cut_mode(self) -> None:
+        """Turn on the cut blade: a click anywhere on the strip cuts at that point."""
+        self._cut_mode = True
+        self._cut_done = False
+        self._cut_position = 0.0
+        self._place_overlay()
+        self._show_cut_blade()
+
+    def _place_overlay(self) -> None:
+        """Show the cut overlay over the whole board and raise it above the clips."""
+        if self._cut_overlay is None:
+            return
+        if not self._cut_overlay.winfo_exists():
+            return
+        self._cut_overlay.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+        self._cut_overlay.lift()
+
+    def disable_cut_mode(self) -> None:
+        """Turn off the cut blade."""
+        self._cut_mode = False
+        self._cut_done = False
+        if self._cut_overlay is not None and self._cut_overlay.winfo_exists():
+            self._cut_overlay.place_forget()
+        if self._cut_blade is not None and self._cut_blade.winfo_exists():
+            self._cut_blade.place_forget()
+
+    def cut_at(self, position: float) -> None:
+        """Record a cut at the given absolute timeline position."""
+        if self._cut_overlay is not None and self._cut_overlay.winfo_exists():
+            self._cut_overlay.place(relx=0, rely=0, relwidth=1.0, relheight=1.0)
+        self._cut_position = max(0.0, float(position))
+        self._cut_done = True
+        self._show_cut_blade()
+
+    def _show_cut_blade(self) -> None:
+        """Position the blade line at the recorded cut point."""
+        if not self._cut_mode or not self._cut_done:
+            if self._cut_blade is not None and self._cut_blade.winfo_exists():
+                self._cut_blade.place_forget()
+            return
+        if self._cut_overlay is not None and self._cut_overlay.winfo_exists():
+            self._cut_blade.place(x=int(self._x_for_time(self._cut_position)) - 1, y=4)
+
+    def _time_for_content_x(self, content_x: int) -> float:
+        """Convert a board content x offset to an absolute timeline position."""
+        return max(0.0, (content_x - LABEL_WIDTH) / self._pixels_per_second)
+
+    def _cut_motion(self, event: Any) -> None:
+        """Move the blade while the pointer hovers in cut mode."""
+        if not self._cut_mode:
+            return
+        if not self._cut_overlay or not self._cut_overlay.winfo_exists():
+            return
+        content_x = int(getattr(event, "x", event.x_root))
+        if content_x < LABEL_WIDTH:
+            return
+        self._cut_position = self._time_for_content_x(content_x)
+        self._cut_done = True
+        if self._cut_blade is not None and self._cut_overlay is not None and self._cut_blade.winfo_exists():
+            self._cut_blade.place(x=content_x - 1, y=4)
+
+    def _strip_click(self, event: Any) -> None:
+        """In cut mode, cut at the pointer; otherwise do nothing."""
+        if not self._cut_mode:
+            return
+        content_x = int(getattr(event, "x", event.x_root))
+        if content_x < LABEL_WIDTH:
+            return
+        self._cut_done = True
+        if self._on_cut is not None:
+            self._on_cut(self._time_for_content_x(content_x))
 
     def set_playhead(self, position: float) -> None:
         """Move the playhead line to a timeline position."""
@@ -334,8 +436,9 @@ class ClipStrip(ctk.CTkFrame):
             row,
             width=self._width_for(length),
             height=BLOCK_HEIGHT,
-            corner_radius=6,
-            fg_color=AUDIO_FG if audio_only else None,
+            corner_radius=8,
+            fg_color=AUDIO_FG if audio_only else ("#1E2229", "#262C35"),
+            border_width=0,
         )
         block.pack_propagate(False)
         block.place(x=x, y=0)
@@ -360,24 +463,47 @@ class ClipStrip(ctk.CTkFrame):
         handle_right.pack(side="right", fill="y")
         body = ctk.CTkFrame(block, fg_color="transparent")
         body.pack(side="left", fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        thumb_label = ctk.CTkLabel(
+            body,
+            text="?",
+            width=THUMB_W,
+            height=THUMB_H,
+            anchor="center",
+            fg_color="#141414",
+            corner_radius=4,
+        )
+        thumb_label.grid(row=0, column=0, columnspan=2, padx=(6, 6), pady=(8, 4))
         name = ctk.CTkLabel(
             body,
             text=_short_name(segment.get("name")),
             anchor="w",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        name.pack(fill="x", padx=6, pady=(8, 0))
-        length_label = ctk.CTkLabel(body, text=_length_text(length), anchor="w")
-        length_label.pack(fill="x", padx=6, pady=(2, 0))
+        name.grid(row=0, column=1, sticky="w", pady=(8, 0), padx=(0, 6))
+        length_label = ctk.CTkLabel(
+            body, text=_length_text(length), anchor="w", font=ctk.CTkFont(size=10)
+        )
+        length_label.grid(row=1, column=1, sticky="w", pady=(0, 1), padx=(0, 6))
         range_label = ctk.CTkLabel(
             body,
             text=_range_text(start, end),
             anchor="w",
-            text_color=("gray40", "gray60"),
+            font=ctk.CTkFont(size=10),
+            text_color=LABEL_DIM,
         )
-        range_label.pack(fill="x", padx=6, pady=(2, 0))
+        range_label.grid(row=2, column=1, sticky="w", padx=(0, 6))
         block.length_label = length_label
         block.range_label = range_label
+        block.thumb_label = thumb_label
+        key = str(segment.get("path"))
+        if key in self._bitmaps and self._bitmaps[key] is not None:
+            image = ctk.CTkImage(
+                light_image=self._bitmaps[key],
+                dark_image=self._bitmaps[key],
+                size=(THUMB_W, THUMB_H),
+            )
+            thumb_label.configure(image=image, text="")
         for widget in (block, body, name, length_label, range_label):
             widget.bind("<Button-1>", lambda event, item=index: self._begin_body_drag(event, item))
             widget.bind("<B1-Motion>", self._body_drag_motion)
@@ -502,8 +628,8 @@ class ClipStrip(ctk.CTkFrame):
             self._on_play(index)
 
     def _show_context(self, event: Any, index: int) -> None:
-        """Select the clip and hand a right-click to the view."""
-        self._on_select(index)
+        """Highlight the clip and hand a right-click to the view (no playhead seek)."""
+        self.select(index)
         if self._on_context is not None:
             self._on_context(index, event)
 
@@ -524,6 +650,101 @@ class ClipStrip(ctk.CTkFrame):
                 duration = 0.0
         self._durations[key] = duration
         return duration
+
+    def _load_thumb(self, path: str) -> Image.Image | None:
+        """Render a small thumbnail bitmap for a clip; safe off the UI thread."""
+        key = str(path)
+        if key in self._bitmaps:
+            return self._bitmaps[key]
+        bitmap: Image.Image | None = None
+        thumb_dir = THUMB_DIR
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+        target = thumb_dir / f"{Path(key).stem}_{abs(hash(key)) % 10**8}.jpg"
+        try:
+            if not target.exists():
+                export_ops.create_thumbnail(key, target, time="00:00:01", width=THUMB_W * 2)
+            with Image.open(target) as loaded:
+                fitted = ImageOps.contain(loaded.convert("RGB"), (THUMB_W, THUMB_H))
+                canvas = Image.new("RGB", (THUMB_W, THUMB_H), "#141414")
+                canvas.paste(
+                    fitted,
+                    ((THUMB_W - fitted.width) // 2, (THUMB_H - fitted.height) // 2),
+                )
+                bitmap = canvas
+        except (OSError, ValueError, RuntimeError):
+            bitmap = None
+        self._bitmaps[key] = bitmap
+        return bitmap
+
+    def _apply_thumb(self, path: str, bitmap: Image.Image | None) -> None:
+        """Show the thumbnail on the matching block."""
+        key = str(path)
+        for block in self._blocks:
+            if not block.winfo_exists():
+                continue
+            index = getattr(block, "segment_index", None)
+            if index is None:
+                continue
+            segment = self.project.timeline[index]
+            if str(segment.get("path")) != key:
+                continue
+            thumb_label = getattr(block, "thumb_label", None)
+            if thumb_label is None or not thumb_label.winfo_exists():
+                continue
+            if bitmap is None:
+                thumb_label.configure(text="?", image=None)
+                continue
+            image = ctk.CTkImage(light_image=bitmap, dark_image=bitmap, size=(THUMB_W, THUMB_H))
+            thumb_label.configure(image=image, text="")
+
+    def _preload_thumbs(self, paths: list[str]) -> None:
+        """Generate thumbnail bitmaps off the UI thread."""
+        for path in paths:
+            try:
+                self._load_thumb(path)
+            except (OSError, ValueError):
+                self._bitmaps[str(path)] = None
+
+    def _poll_thumbs(self) -> None:
+        """Apply finished thumbnails and stop polling once all are done."""
+        pending: list[str] = []
+        for block in list(self._blocks):
+            if not block.winfo_exists():
+                continue
+            index = getattr(block, "segment_index", None)
+            if index is None:
+                continue
+            segment = self.project.timeline[index]
+            path = str(segment.get("path"))
+            if path in self._bitmaps and self._bitmaps[path] is not None:
+                self._apply_thumb(path, self._bitmaps[path])
+            elif path not in self._bitmaps:
+                pending.append(path)
+        if pending:
+            self.after(THUMB_POLL_MS, self._poll_thumbs)
+        else:
+            self._thumb_busy = False
+
+    def _start_thumbs(self) -> None:
+        """Queue thumbnail generation for blocks that do not have one yet."""
+        if self._thumb_busy:
+            return
+        pending: list[str] = []
+        for block in self._blocks:
+            if not block.winfo_exists():
+                continue
+            index = getattr(block, "segment_index", None)
+            if index is None:
+                continue
+            segment = self.project.timeline[index]
+            path = str(segment.get("path"))
+            if path not in self._bitmaps:
+                pending.append(path)
+        if not pending:
+            return
+        self._thumb_busy = True
+        threading.Thread(target=self._preload_thumbs, args=(pending,), daemon=True).start()
+        self.after(THUMB_POLL_MS, self._poll_thumbs)
 
     def _update_block(self, block: ctk.CTkFrame, clip_range: tuple[float, float]) -> None:
         """Resize a block and refresh its labels for a dragged range."""

@@ -168,6 +168,40 @@ class Project:
         self._resync()
         return segment
 
+    def split_segment_at(self, index: int, position: float) -> tuple[dict, dict]:
+        """Cut a timeline segment into two at an absolute timeline position.
+
+        The position is in timeline seconds. Both halves stay on the same lane
+        and the second half is placed directly after the first. Returns the
+        two new segments.
+        """
+        position_idx = _segment_index(self.timeline, index)
+        segment = self.timeline[position_idx]
+        start = float(segment.get("start") or 0.0)
+        end = float(segment.get("end") or 0.0)
+        abs_start = _abs_start(segment)
+        abs_end = _abs_end(segment)
+        if position <= abs_start + 0.001:
+            raise ValueError("The cut point is at or before the clip start.")
+        if position >= abs_end - 0.001:
+            raise ValueError("The cut point is at or past the clip end.")
+        self.push_undo()
+        cut_source = max(start, min(end, start + (position - abs_start)))
+        segment["end"] = cut_source
+        second = {
+            "path": segment.get("path"),
+            "name": segment.get("name"),
+            "start": cut_source,
+            "end": end,
+            "layer": int(segment.get("layer") or 0),
+            "kind": str(segment.get("kind") or "video"),
+            "mute": bool(segment.get("mute")),
+            "lead": 0.0,
+        }
+        self.timeline.insert(position_idx + 1, second)
+        self._resync()
+        return self.timeline[position_idx], self.timeline[position_idx + 1]
+
     def set_segment_layer(self, index: int, layer: int) -> dict:
         """Move a timeline clip onto another layer, appended on top."""
         position = _segment_index(self.timeline, index)
@@ -209,11 +243,20 @@ class Project:
         if not audible:
             raise ValueError("This clip has no audio track.")
         self.push_undo()
-        lane = int(segment.get("layer") or 0) - 1
+        video_start = _abs_start(segment)
+        # Pick an audio lane (below the video layers) that has room for the
+        # clip's range. Start at the top audio lane and go down, creating a
+        # new lane when the current one is occupied at that position.
+        lane = -1
         cursor = 0.0
-        for item in self.timeline[: position + 1]:
-            if int(item.get("layer") or 0) == lane:
-                cursor = _abs_end(item)
+        while True:
+            cursor = 0.0
+            for item in self.timeline[: position + 1]:
+                if int(item.get("layer") or 0) == lane:
+                    cursor = _abs_end(item)
+            if cursor <= video_start + 1e-6:
+                break
+            lane -= 1
         segment["mute"] = True
         audio = {
             "path": segment.get("path"),
@@ -222,7 +265,7 @@ class Project:
             "end": float(segment.get("end") or 0.0),
             "layer": lane,
             "kind": "audio",
-            "lead": max(0.0, _abs_start(segment) - cursor),
+            "lead": max(0.0, video_start - cursor),
         }
         self.timeline.insert(position + 1, audio)
         self._resync()

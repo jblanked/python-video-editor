@@ -292,9 +292,28 @@ def exercise(app: VideoEditorApp) -> None:
         for row in toolbar.winfo_children()
         for button in row.winfo_children()
     ]
-    assert "Detach Audio" in toolbar_labels, toolbar_labels
-    for button in ("Undo", "Redo", "Copy", "Paste"):
+    for button in ("File \u25be", "Edit \u25be", "Add Clip", "Cut"):
         assert button in toolbar_labels, (button, toolbar_labels)
+    assert "Undo" not in toolbar_labels, "Undo should live in the Edit dropdown"
+    assert "Detach Audio" not in toolbar_labels, "Detach Audio should live in the Edit dropdown"
+
+    def menu_labels(menu) -> list[str]:
+        return [
+            str(menu.entrycget(index, "label"))
+            for index in range(int(menu.index("end") or 0) + 1)
+            if menu.type(index) != "separator"
+        ]
+
+    file_labels = menu_labels(timeline.file_menu)
+    assert file_labels == ["New", "Open", "Save", "JSON"], file_labels
+    edit_labels = menu_labels(timeline.edit_menu)
+    expected_edit = (
+        ["Undo", "Redo", "Copy", "Paste",
+         "Remove", "Move Left", "Move Right", "Add Layer",
+         "Layer Up", "Layer Down", "Detach Audio", "Transcribe", "Clear"]
+    )
+    assert edit_labels == expected_edit, edit_labels
+
     for row in toolbar.winfo_children():
         assert row.winfo_reqwidth() <= toolbar.winfo_width(), (
             "toolbar row overflows",
