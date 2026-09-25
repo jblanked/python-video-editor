@@ -3,6 +3,8 @@
 A desktop video editor for local files, built with customtkinter and ffmpeg.
 A built-in AI assistant can run any editing operation for you.
 
+![Timeline](./images/timeline.jpg)
+
 ## Requirements
 
 - Python 3.10 or newer
