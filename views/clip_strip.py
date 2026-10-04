@@ -25,7 +25,7 @@ MIN_LENGTH = 0.2
 DRAG_THRESHOLD = 5
 SCROLL_EDGE = 26
 SCROLL_UNITS = 1
-DEFAULT_ZOOM = 40
+DEFAULT_ZOOM = 10
 ZOOM_LEVELS = (10, 20, 40, 80)
 THUMB_H = 34
 THUMB_W = 56
@@ -33,6 +33,7 @@ THUMB_DIR = Path(gettempdir()) / "video_editor_strip_thumbs"
 THUMB_POLL_MS = 150
 DRAG_FG = ("#DCE4EE", "#343B44")
 ACCENT = ("#3B8ED0", "#1F6AA5")
+SELECTED_FG = ("#CFE6FA", "#315C80")
 HANDLE_FG = ("#AAB4BF", "#4A5560")
 PLAYHEAD_FG = "#E05C5C"
 LABEL_FG = ("#E8EAED", "#2B2D31")
@@ -47,11 +48,12 @@ class ClipStrip(ctk.CTkFrame):
         self,
         master: Any,
         project: Any,
-        on_select: Callable[[int], None],
+        on_select: Callable[[int, Any], None],
         on_change: Callable[[str, int | None], None],
         on_play: Callable[[int], None] | None = None,
         on_context: Callable[[int, Any], None] | None = None,
         on_cut: Callable[[float], None] | None = None,
+        on_zoom: Callable[[float], None] | None = None,
     ) -> None:
         """Create the layered board, its rows, and the playhead line."""
         super().__init__(master, fg_color="transparent")
@@ -61,13 +63,14 @@ class ClipStrip(ctk.CTkFrame):
         self._on_play = on_play
         self._on_context = on_context
         self._on_cut = on_cut
+        self._on_zoom = on_zoom
         self._pixels_per_second = float(DEFAULT_ZOOM)
         self._blocks: list[ctk.CTkFrame] = []
         self._by_index: dict[int, ctk.CTkFrame] = {}
         self._rows: dict[int, ctk.CTkFrame] = {}
         self._durations: dict[str, float] = {}
         self._bitmaps: dict[str, Image.Image | None] = {}
-        self._selected: int | None = None
+        self._selected: set[int] = set()
         self._playhead = 0.0
         self._empty_label: ctk.CTkLabel | None = None
         self._drag_block: ctk.CTkFrame | None = None
@@ -90,9 +93,11 @@ class ClipStrip(ctk.CTkFrame):
             self, orientation="horizontal", height=BLOCK_HEIGHT + ROW_GAP + 26
         )
         self._strip.pack(fill="both", expand=True)
+        self._bind_wheel(self._strip._parent_canvas)
         self._board = ctk.CTkFrame(self._strip, fg_color="transparent")
         self._board.pack(anchor="nw")
         self._board.pack_propagate(False)
+        self._bind_wheel(self._board)
         self._playhead_line = ctk.CTkFrame(
             self._board, width=2, height=BLOCK_HEIGHT, fg_color=PLAYHEAD_FG
         )
@@ -141,6 +146,7 @@ class ClipStrip(ctk.CTkFrame):
         for layer in range(highest, bottom - 1, -1):
             row = ctk.CTkFrame(self._board, fg_color="transparent", width=board_width, height=BLOCK_HEIGHT)
             row.place(x=0, y=(highest - layer) * ROW_STRIDE)
+            self._bind_wheel(row)
             label = ctk.CTkLabel(
                 row,
                 text=layer_label(layer),
@@ -169,9 +175,14 @@ class ClipStrip(ctk.CTkFrame):
         self._show_cut_blade()
         self._start_thumbs()
 
-    def select(self, index: int | None) -> None:
-        """Highlight the block that matches a timeline index."""
-        self._selected = index
+    def select(self, indices: int | set[int] | None) -> None:
+        """Highlight the selected timeline blocks."""
+        if indices is None:
+            self._selected = set()
+        elif isinstance(indices, set):
+            self._selected = set(indices)
+        else:
+            self._selected = {indices}
         self._apply_selection()
 
     def enable_cut_mode(self) -> None:
@@ -270,6 +281,34 @@ class ClipStrip(ctk.CTkFrame):
         self._pixels_per_second = value
         self.refresh()
 
+    def scroll_by(self, step: int) -> None:
+        """Scroll the clip strip sideways by whole units."""
+        canvas = getattr(self._strip, "_parent_canvas", None)
+        if canvas is not None:
+            canvas.xview_scroll(step, "units")
+
+    def zoom_by(self, direction: int, pointer_x: int) -> float:
+        """Change zoom one level while keeping the pointer's timeline position fixed."""
+        levels = list(ZOOM_LEVELS)
+        current = self._pixels_per_second
+        nearest = min(range(len(levels)), key=lambda position: abs(levels[position] - current))
+        target = max(0, min(len(levels) - 1, nearest + direction))
+        if target == nearest:
+            return current
+        canvas = getattr(self._strip, "_parent_canvas", None)
+        if canvas is None:
+            self.set_zoom(levels[target])
+            return self._pixels_per_second
+        local_x = max(0, pointer_x - canvas.winfo_rootx())
+        anchor_x = canvas.canvasx(local_x)
+        anchor_time = max(0.0, (anchor_x - LABEL_WIDTH) / current)
+        self.set_zoom(levels[target])
+        self.update_idletasks()
+        board_width = max(1, int(self._board.cget("width")))
+        target_x = LABEL_WIDTH + anchor_time * levels[target]
+        canvas.xview_moveto(max(0.0, (target_x - local_x) / board_width))
+        return self._pixels_per_second
+
     def drop_target(self, pointer_x: int, pointer_y: int) -> tuple[int, int]:
         """Return the (layer, index) under the pointer for a pool drop."""
         bottom = self.project.bottom_layer()
@@ -329,10 +368,10 @@ class ClipStrip(ctk.CTkFrame):
         for block in self._blocks:
             if not block.winfo_exists():
                 continue
-            if getattr(block, "segment_index", None) == self._selected:
-                block.configure(border_width=2, border_color=ACCENT)
+            if getattr(block, "segment_index", None) in self._selected:
+                block.configure(fg_color=SELECTED_FG, border_width=3, border_color=ACCENT)
             else:
-                block.configure(border_width=0)
+                block.configure(fg_color=getattr(block, "default_fg", None), border_width=0)
 
     def _auto_scroll(self, pointer_x: int) -> None:
         """Scroll the strip while dragging near its left or right edge."""
@@ -348,7 +387,7 @@ class ClipStrip(ctk.CTkFrame):
 
     def _begin_body_drag(self, event: Any, index: int) -> None:
         """Select the pressed clip and prepare a layer or position drag."""
-        self._on_select(index)
+        self._on_select(index, event)
         self._drag_block = self._by_index.get(index)
         self._drag_index = index
         segment = self.project.timeline[index] if 0 <= index < len(self.project.timeline) else {}
@@ -364,7 +403,7 @@ class ClipStrip(ctk.CTkFrame):
 
     def _begin_edge_drag(self, event: Any, index: int, edge: str) -> None:
         """Select the pressed clip and prepare an edge trim drag."""
-        self._on_select(index)
+        self._on_select(index, event)
         block = self._by_index.get(index)
         self._drag_block = block
         self._drag_index = index
@@ -504,11 +543,12 @@ class ClipStrip(ctk.CTkFrame):
                 size=(THUMB_W, THUMB_H),
             )
             thumb_label.configure(image=image, text="")
-        for widget in (block, body, name, length_label, range_label):
+        for widget in (block, body, thumb_label, name, length_label, range_label):
             widget.bind("<Button-1>", lambda event, item=index: self._begin_body_drag(event, item))
             widget.bind("<B1-Motion>", self._body_drag_motion)
             widget.bind("<ButtonRelease-1>", self._end_body_drag)
             widget.bind("<Double-Button-1>", lambda _event, item=index: self._play(item))
+            self._bind_wheel(widget)
             for sequence in ("<Button-2>", "<Button-3>", "<Control-Button-1>"):
                 widget.bind(sequence, lambda event, item=index: self._show_context(event, item))
         for widget, edge in ((handle_left, "left"), (handle_right, "right")):
@@ -518,7 +558,29 @@ class ClipStrip(ctk.CTkFrame):
             )
             widget.bind("<B1-Motion>", self._edge_drag_motion)
             widget.bind("<ButtonRelease-1>", self._end_edge_drag)
+            self._bind_wheel(widget)
         return block
+
+    def _bind_wheel(self, widget: Any) -> None:
+        """Handle wheel gestures directly on strip widgets before class scrolling."""
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(sequence, self._on_wheel)
+
+    def _on_wheel(self, event: Any) -> str:
+        """Zoom on the wheel; Shift-wheel scrolls horizontally."""
+        delta = int(getattr(event, "delta", 0) or 0)
+        button = str(getattr(event, "num", "") or "")
+        if not delta and button not in {"4", "5"}:
+            return "break"
+        direction = 1 if delta > 0 or button == "4" else -1
+        state = int(getattr(event, "state", 0) or 0)
+        if state & 0x1:
+            self.scroll_by(-direction)
+            return "break"
+        level = self.zoom_by(direction, int(getattr(event, "x_root", 0)))
+        if self._on_zoom is not None:
+            self._on_zoom(level)
+        return "break"
 
     def _edge_drag_motion(self, event: Any) -> None:
         """Resize the clip block while its in or out point is dragged."""
@@ -629,7 +691,8 @@ class ClipStrip(ctk.CTkFrame):
 
     def _show_context(self, event: Any, index: int) -> None:
         """Highlight the clip and hand a right-click to the view (no playhead seek)."""
-        self.select(index)
+        if index not in self._selected:
+            self._on_select(index, event)
         if self._on_context is not None:
             self._on_context(index, event)
 

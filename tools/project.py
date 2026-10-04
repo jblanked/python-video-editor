@@ -152,6 +152,36 @@ class Project:
         self._resync()
         return segment
 
+    def move_segments(self, indices: list[int], offset: int) -> list[dict]:
+        """Move selected timeline segments by one shared index offset."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        segments = [self.timeline[position] for position in positions]
+        if not segments or offset == 0:
+            return segments
+        self.push_undo()
+        moving = segments if offset < 0 else reversed(segments)
+        for segment in moving:
+            current = next(
+                position for position, item in enumerate(self.timeline) if item is segment
+            )
+            self.timeline.pop(current)
+            target = max(0, min(current + int(offset), len(self.timeline)))
+            self.timeline.insert(target, segment)
+        self._resync()
+        return segments
+
+    def remove_segments(self, indices: list[int]) -> list[dict]:
+        """Remove selected timeline segments as one undoable edit."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        if not positions:
+            return []
+        self.push_undo()
+        removed = [self.timeline[position] for position in positions]
+        for position in reversed(positions):
+            self.timeline.pop(position)
+        self._resync()
+        return removed
+
     def remove_media(self, path: str | Path) -> bool:
         """Remove a file from the media pool; returns True when it was present."""
         target = str(Path(str(path)).expanduser())
@@ -217,7 +247,54 @@ class Project:
         self._resync()
         return segment
 
-    def detach_audio(self, index: int) -> tuple[dict, dict]:
+    def set_segments_layer(self, indices: list[int], layer: int) -> list[dict]:
+        """Move multiple timeline clips onto one layer, preserving their order."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        return self.set_segments_layers(positions, [int(layer)] * len(positions))
+
+    def set_segments_layers(self, indices: list[int], layers: list[int]) -> list[dict]:
+        """Move selected timeline clips to individual target layers in one edit."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        if len(positions) != len(layers):
+            raise ValueError("Provide one target layer for each selected clip.")
+        if not positions:
+            return []
+        targets = [int(layer) for layer in layers]
+        segments = [self.timeline[position] for position in positions]
+        self.push_undo()
+        selected_ids = {id(segment) for segment in segments}
+        remaining = [segment for segment in self.timeline if id(segment) not in selected_ids]
+        for segment, target in zip(segments, targets):
+            segment["layer"] = target
+            insert_at = max(
+                (position + 1 for position, item in enumerate(remaining)
+                 if int(item.get("layer") or 0) == target),
+                default=len(remaining),
+            )
+            remaining.insert(insert_at, segment)
+        self.timeline[:] = remaining
+        if targets:
+            self.layers = max(self.layers, max(targets) + 1)
+        self._resync()
+        return segments
+
+    def set_segments_range(self, indices: list[int], start: Any = None, end: Any = None) -> list[dict]:
+        """Apply one in/out range to selected clips as a single undoable edit."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        segments = [self.timeline[position] for position in positions]
+        ranges = [
+            _clamp_range(segment, start, end, keep_missing=True) for segment in segments
+        ]
+        if not segments:
+            return []
+        self.push_undo()
+        for segment, (start_seconds, end_seconds) in zip(segments, ranges):
+            segment["start"] = start_seconds
+            segment["end"] = end_seconds
+        self._resync()
+        return segments
+
+    def detach_audio(self, index: int, *, record_undo: bool = True) -> tuple[dict, dict]:
         """Split a clip's audio onto its own lane under the clip.
 
         The clip keeps playing without sound and the new audio segment holds the
@@ -225,24 +302,9 @@ class Project:
         """
         position = _segment_index(self.timeline, index)
         segment = self.timeline[position]
-        if str(segment.get("kind") or "video") == "audio":
-            raise ValueError("This clip is already an audio track.")
-        if segment.get("mute"):
-            raise ValueError("The audio of this clip is already separated.")
-        path = str(segment.get("path"))
-        audible = False
-        for clip in self.media:
-            if str(clip.get("path")) == path:
-                audible = bool(clip.get("has_audio"))
-                break
-        else:
-            try:
-                audible = ff.has_audio(ff.probe(path))
-            except (ValueError, OSError):
-                audible = False
-        if not audible:
-            raise ValueError("This clip has no audio track.")
-        self.push_undo()
+        self._validate_audio_detach(segment)
+        if record_undo:
+            self.push_undo()
         video_start = _abs_start(segment)
         # Pick an audio lane (below the video layers) that has room for the
         # clip's range. Start at the top audio lane and go down, creating a
@@ -270,6 +332,44 @@ class Project:
         self.timeline.insert(position + 1, audio)
         self._resync()
         return segment, audio
+
+    def _validate_audio_detach(self, segment: dict) -> None:
+        """Reject clips that cannot be detached before a batch is mutated."""
+        if str(segment.get("kind") or "video") == "audio":
+            raise ValueError("This clip is already an audio track.")
+        if segment.get("mute"):
+            raise ValueError("The audio of this clip is already separated.")
+        path = str(segment.get("path"))
+        audible = False
+        for clip in self.media:
+            if str(clip.get("path")) == path:
+                audible = bool(clip.get("has_audio"))
+                break
+        else:
+            try:
+                audible = ff.has_audio(ff.probe(path))
+            except (ValueError, OSError):
+                audible = False
+        if not audible:
+            raise ValueError("This clip has no audio track.")
+
+    def detach_audio_segments(self, indices: list[int]) -> list[tuple[dict, dict]]:
+        """Detach audio from selected clips as one undoable edit."""
+        positions = sorted({_segment_index(self.timeline, index) for index in indices})
+        if not positions:
+            return []
+        for position in positions:
+            self._validate_audio_detach(self.timeline[position])
+        segments = [self.timeline[position] for position in positions]
+        self.push_undo()
+        detached: list[tuple[dict, dict]] = []
+        for segment in segments:
+            position = next(
+                index for index, item in enumerate(self.timeline) if item is segment
+            )
+            detached.append(self.detach_audio(position, record_undo=False))
+        self._resync()
+        return detached
 
     def set_segment_lead(self, index: int, lead: Any) -> dict:
         """Shift a clip along its lane by holding empty space before it."""

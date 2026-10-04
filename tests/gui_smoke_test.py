@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import context, paths, preview  # noqa: E402
 from tools.registry import find_op  # noqa: E402
 from views.app import VideoEditorApp  # noqa: E402
-from views.clip_strip import AUDIO_FG  # noqa: E402
+from views.clip_strip import AUDIO_FG, SELECTED_FG  # noqa: E402
 from views.op_form import OperationDialog  # noqa: E402
 from views.text_dialog import TextDialog  # noqa: E402
 
@@ -98,6 +98,63 @@ def exercise(app: VideoEditorApp) -> None:
     first_block = blocks[0]
     last_block = blocks[2]
     assert first_block.winfo_width() > 1, "clip blocks should be laid out"
+    timeline._on_strip_select(0)
+    timeline._on_strip_select(2, SimpleNamespace(state=1))
+    assert timeline.selected_indices == {0, 1, 2}, timeline.selected_indices
+    timeline._on_strip_select(1, SimpleNamespace(state=4))
+    assert timeline.selected_indices == {0, 2}, timeline.selected_indices
+    assert strip._selected == {0, 2}, strip._selected
+    timeline._set_selection(set(), None)
+    strip.set_zoom(40)
+    app.update()
+    strip._by_index[0].thumb_label._label.event_generate("<Button-1>", x=10, y=10)
+    app.update()
+    assert timeline.selected_indices == {0}, timeline.selected_indices
+    assert strip._by_index[0].cget("border_width") == 3
+    assert strip._by_index[0].cget("fg_color") == SELECTED_FG
+    strip._by_index[0].thumb_label._label.event_generate("<ButtonRelease-1>", x=10, y=10)
+    strip._by_index[1].thumb_label._label.event_generate(
+        "<Button-1>", x=10, y=10, state=4
+    )
+    app.update()
+    assert timeline.selected_indices == {0, 1}, timeline.selected_indices
+    strip._by_index[1].thumb_label._label.event_generate("<ButtonRelease-1>", x=10, y=10)
+    app.project.add_to_timeline(SAMPLE)
+    app.project.add_to_timeline(SAMPLE_B)
+    timeline.refresh()
+    app.update()
+    strip._by_index[0].thumb_label._label.event_generate("<Button-1>", x=10, y=10)
+    app.update()
+    strip._by_index[0].thumb_label._label.event_generate("<ButtonRelease-1>", x=10, y=10)
+    strip._by_index[2].thumb_label._label.event_generate(
+        "<Button-1>", x=10, y=10, state=1
+    )
+    app.update()
+    strip._by_index[2].thumb_label._label.event_generate(
+        "<ButtonRelease-1>", x=10, y=10, state=1
+    )
+    strip._by_index[4].thumb_label._label.event_generate(
+        "<Button-1>", x=10, y=10, state=1
+    )
+    app.update()
+    assert timeline.selected_indices == set(range(5)), timeline.selected_indices
+    strip._by_index[4].thumb_label._label.event_generate(
+        "<ButtonRelease-1>", x=10, y=10, state=1
+    )
+    app.project.remove_segment(4)
+    app.project.remove_segment(3)
+    timeline.refresh()
+    app.update()
+    strip._by_index[0]._canvas.event_generate("<MouseWheel>", delta=120, x=10, y=10)
+    app.update()
+    assert strip._pixels_per_second == 80, strip._pixels_per_second
+    assert timeline.zoom_menu.get() == "80", timeline.zoom_menu.get()
+    strip._by_index[0]._canvas.event_generate("<MouseWheel>", delta=120, x=10, y=10, state=1)
+    app.update()
+    assert strip._pixels_per_second == 80, strip._pixels_per_second
+    strip.set_zoom(10)
+    timeline.zoom_menu.set("10")
+    timeline._select(0)
 
     # Layers: add a layer, move a clip up and back, and confirm rows rebuild.
     timeline._add_layer()
@@ -121,6 +178,8 @@ def exercise(app: VideoEditorApp) -> None:
     app.update()
     order = [segment["path"] for segment in app.project.timeline]
     assert order == [SAMPLE_B, SAMPLE, SAMPLE], order
+    assert strip._pixels_per_second == 10, strip._pixels_per_second
+    assert timeline.zoom_menu.get() == "10", timeline.zoom_menu.get()
     timeline.selected_index = 2
 
     # Right-click menu: operation groups, clip actions, and wired commands.
@@ -233,6 +292,26 @@ def exercise(app: VideoEditorApp) -> None:
     assert dialog_args.get("start") == "1", dialog_args
     operation_dialog.destroy()
 
+    info_op = find_op("get_video_info")
+    assert info_op is not None
+    batch_results: list[dict] = []
+    batch_dialog = OperationDialog(
+        timeline,
+        info_op,
+        SAMPLE,
+        on_done=batch_results.append,
+        source_paths=[SAMPLE, SAMPLE_B],
+    )
+    batch_dialog.run_now()
+    deadline = time.time() + 30
+    while time.time() < deadline and batch_dialog.run_button.cget("state") == "disabled":
+        app.update()
+        time.sleep(0.05)
+    assert batch_results and batch_results[0].get("success"), batch_results
+    assert "sample_a.mp4" in batch_results[0]["message"], batch_results
+    assert "sample_b.mp4" in batch_results[0]["message"], batch_results
+    batch_dialog.destroy()
+
     # Trim every segment to one second so embedded playback finishes quickly.
     for index in range(len(app.project.timeline)):
         app.project.set_segment_range(index, start=0, end=1)
@@ -340,6 +419,61 @@ def exercise(app: VideoEditorApp) -> None:
     app.project.remove_segment(2)
     app.project.timeline[1]["mute"] = False
     app.project.clear_timeline()
+    app.project.add_to_timeline(SAMPLE)
+
+    # Group movement, range changes, and layer changes retain the selection.
+    app.project.clear_timeline()
+    for path in (SAMPLE_B, SAMPLE, SAMPLE_B, SAMPLE):
+        app.project.add_to_timeline(path)
+    timeline.refresh()
+    timeline._set_selection({1, 2}, 2)
+    timeline._move(1)
+    assert [item["path"] for item in app.project.timeline] == [
+        SAMPLE_B, SAMPLE, SAMPLE, SAMPLE_B
+    ], app.project.timeline
+    assert timeline.selected_indices == {2, 3}, timeline.selected_indices
+    timeline._set_selection({0, 2}, 2)
+    timeline.in_var.set("1")
+    timeline.out_var.set("2")
+    timeline._apply_range()
+    assert app.project.timeline[0]["start"] == 1
+    assert app.project.timeline[2]["start"] == 1
+    assert app.project.timeline[1]["start"] == 0
+    timeline._change_layer(1)
+    assert timeline.selected_indices == {2, 3}, timeline.selected_indices
+    assert all(app.project.timeline[index]["layer"] == 1 for index in timeline.selected_indices)
+
+    app.project.clear_timeline()
+    app.project.add_to_timeline(SAMPLE)
+    app.project.add_to_timeline(SAMPLE)
+    timeline.refresh()
+    app.update()
+    timeline._set_selection({0, 1}, 1)
+    timeline._detach_audio()
+    assert sum(item.get("kind") == "audio" for item in app.project.timeline) == 2
+    timeline._set_selection({1, 3}, 3)
+    timeline._remove()
+    assert len(app.project.timeline) == 2
+    assert all(item.get("kind", "video") == "video" for item in app.project.timeline)
+    app.project.clear_timeline()
+    for _ in range(3):
+        app.project.add_to_timeline(SAMPLE)
+    timeline.refresh()
+    timeline._set_selection({0, 1, 2}, 2)
+    detach_menu = timeline._build_context_menu(1)
+    detach_entry = next(
+        index
+        for index in range(int(detach_menu.index("end") or 0) + 1)
+        if detach_menu.type(index) == "command"
+        and detach_menu.entrycget(index, "label") == "Detach Audio"
+    )
+    detach_menu.invoke(detach_entry)
+    detach_menu.destroy()
+    assert sum(item.get("kind") == "audio" for item in app.project.timeline) == 3
+    timeline._undo()
+    assert len(app.project.timeline) == 3
+    assert all(item.get("kind", "video") == "video" for item in app.project.timeline)
+    app.project.clear_timeline()
     app.project.add_to_timeline(SAMPLE_B)
     app.project.add_to_timeline(SAMPLE)
     app.project.add_to_timeline(SAMPLE)
@@ -439,6 +573,19 @@ def exercise(app: VideoEditorApp) -> None:
     assert canvas.xview()[0] < before, canvas.xview()
     original_pointer = timeline.winfo_pointerxy
     timeline.winfo_pointerxy = lambda: (strip.winfo_rootx() + 40, strip.winfo_rooty() + 30)
+    strip.set_zoom(40)
+    timeline.zoom_menu.set("40")
+    assert timeline._on_wheel(
+        SimpleNamespace(delta=120, num="", state=4, x_root=strip.winfo_rootx() + 80)
+    ) == "break"
+    assert strip._pixels_per_second == 80, strip._pixels_per_second
+    assert timeline.zoom_menu.get() == "80", timeline.zoom_menu.get()
+    timeline._on_wheel(
+        SimpleNamespace(delta=-120, num="", state=4, x_root=strip.winfo_rootx() + 80)
+    )
+    assert strip._pixels_per_second == 40, strip._pixels_per_second
+    strip.set_zoom(80)
+    timeline.zoom_menu.set("80")
     assert timeline._on_wheel(SimpleNamespace(delta=1, num="")) == "break"
     assert canvas.xview()[0] > 0.0, "the wheel should scroll the strip"
     timeline.winfo_pointerxy = lambda: (timeline.pool.winfo_rootx() + 20, timeline.pool.winfo_rooty() + 20)

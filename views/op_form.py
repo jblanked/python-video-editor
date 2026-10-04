@@ -145,14 +145,19 @@ class OperationDialog(ctk.CTkToplevel):
         op: Op,
         source_path: str,
         on_done: Callable[[dict], None] | None = None,
+        source_paths: list[str] | None = None,
     ) -> None:
         """Create the dialog for an operation and its source clip."""
         super().__init__(master)
         self.operation = op
         self.source_path = source_path
+        self.source_paths = source_paths or [source_path]
         self._on_done = on_done
         self._busy = False
-        self.title(f"{op.label} - {Path(source_path).name}")
+        title = f"{op.label} - {Path(source_path).name}"
+        if len(self.source_paths) > 1:
+            title = f"{op.label} - {len(self.source_paths)} clips"
+        self.title(title)
         self.geometry("620x470")
         self.minsize(480, 360)
         self.transient(master.winfo_toplevel())
@@ -204,5 +209,60 @@ class OperationDialog(ctk.CTkToplevel):
 
     def _worker(self, args: dict) -> None:
         """Execute the tool off the UI thread."""
-        result = execute_tool(self.operation.name, args)
+        path_param = next(
+            (param for param in self.operation.params if param.name == "path"), None
+        )
+        paths_param = next(
+            (param for param in self.operation.params if param.name == "paths"), None
+        )
+        if paths_param is not None and len(self.source_paths) > 1:
+            batch_args = dict(args)
+            batch_args["paths"] = self.source_paths
+            results = [execute_tool(self.operation.name, batch_args)]
+        elif path_param is not None and len(self.source_paths) > 1:
+            results = []
+            output_key = "output" if self.operation.output_kind == "file" else "output_dir"
+            configured_output = args.get(output_key)
+            default_output = None
+            if configured_output:
+                try:
+                    default_output = str(
+                        default_output_path(
+                            self.operation,
+                            {**args, "path": self.source_paths[0]},
+                        )
+                    )
+                except (ValueError, OSError):
+                    pass
+            for position, source in enumerate(self.source_paths):
+                item_args = {**args, "path": source}
+                if configured_output:
+                    if str(configured_output) == default_output:
+                        item_args.pop(output_key, None)
+                    elif position:
+                        output_path = Path(str(configured_output))
+                        item_args[output_key] = str(
+                            output_path.with_name(
+                                f"{output_path.stem}_{position + 1}{output_path.suffix}"
+                            )
+                        )
+                results.append(execute_tool(self.operation.name, item_args))
+        else:
+            results = [execute_tool(self.operation.name, args)]
+
+        if len(results) == 1:
+            result = results[0]
+        else:
+            outputs = [item.get("output") for item in results if item.get("output")]
+            result = {
+                "success": all(item.get("success") for item in results),
+                "message": "\n".join(
+                    f"{Path(source).name}: {item.get('message', '')}"
+                    for source, item in zip(self.source_paths, results)
+                ),
+                "outputs": outputs,
+                "details": [item.get("details") for item in results],
+            }
+            if len(outputs) == 1:
+                result["output"] = outputs[0]
         self.after(0, lambda: self._finish(result))

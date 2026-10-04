@@ -16,6 +16,15 @@ SAMPLE = "/tmp/ve_test/sample_a.mp4"
 
 def main() -> int:
     """Run a mocked conversation through the agent loop."""
+    system_prompt = " ".join(agent.SYSTEM_PROMPT.split())
+    for required in (
+        "Do not call editing or transcription tools before the user chooses.",
+        "transcribe_timeline for timeline clips",
+        "Present the plan before editing.",
+        "propose exactly three distinct alternative video ideas",
+        "only execute after approval.",
+    ):
+        assert required in system_prompt, required
     if not Path(SAMPLE).exists():
         print("sample media missing, run tests/smoke_test.py first")
         return 2

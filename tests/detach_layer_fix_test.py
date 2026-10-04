@@ -89,6 +89,26 @@ def test_detach_two_clips_same_lane():
     print("PASS two clips same lane:", {int(s.get("layer")) for s in project.timeline})
 
 
+def test_detach_batch_preserves_parent_positions():
+    """Batch detachment must keep every audio segment aligned with its video."""
+    project = _make_project()
+    for index in range(3):
+        add_segment(project, 0, 0.0, 4.0)
+        project.timeline[-1]["name"] = f"clip-{index}"
+    parents = list(project.timeline)
+
+    detached = project.detach_audio_segments([0, 1, 2])
+
+    assert len(detached) == 3
+    for segment, audio in detached:
+        assert segment in parents
+        assert abs(audio["abs_start"] - segment["abs_start"]) < 0.01, (
+            segment,
+            audio,
+        )
+    print("PASS batch clips remain aligned")
+
+
 def test_detach_creates_new_lane_when_occupied():
     """When the top audio lane is occupied at the clip's position, create a new one below."""
     project = _make_project()
@@ -127,6 +147,7 @@ def test_existing_test_contract():
 if __name__ == "__main__":
     test_detach_high_layer_aligned()
     test_detach_two_clips_same_lane()
+    test_detach_batch_preserves_parent_positions()
     test_detach_creates_new_lane_when_occupied()
     test_existing_test_contract()
     print("All detach-layer tests passed.")

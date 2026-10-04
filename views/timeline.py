@@ -99,6 +99,8 @@ class TimelineView(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self.selected_index: int | None = None
+        self.selected_indices: set[int] = set()
+        self._selection_anchor: int | None = None
         self.selected_path: str | None = None
         self._last_output: str | None = None
         self._thumbnails: dict[str, ctk.CTkImage | None] = {}
@@ -148,11 +150,20 @@ class TimelineView(ctk.CTkFrame):
         """Rebuild the pool cards, clip strip, and transport from the project."""
         timeline = self.app.project.timeline
         self._refresh_pool()
+        self.selected_indices = {
+            index for index in self.selected_indices if 0 <= index < len(timeline)
+        }
+        if self._selection_anchor is not None and not 0 <= self._selection_anchor < len(timeline):
+            self._selection_anchor = None
         if self.selected_index is not None and self.selected_index >= len(timeline):
             self.selected_index = None
+        if self.selected_index is not None:
+            self.selected_indices.add(self.selected_index)
+        elif self.selected_indices:
+            self.selected_index = max(self.selected_indices)
         total = self._total_duration()
         self.strip.refresh()
-        self.strip.select(self.selected_index)
+        self.strip.select(self.selected_indices)
         total_label_text = (
             f"{len(timeline)} clip(s) on {self.app.project.layer_count()} layer(s)  |  "
             f"total {_duration_text(total)}  |  drag a clip up or down to change its layer"
@@ -188,20 +199,22 @@ class TimelineView(ctk.CTkFrame):
         self.app.refresh_views()
 
     def _apply_range(self) -> None:
-        """Apply the in and out fields to the selected segment."""
-        if self.selected_index is None:
+        """Apply the in and out fields to every selected segment."""
+        targets = self._selected_targets()
+        if not targets:
             self._log("Select a timeline clip first.")
             return
         try:
-            segment = self.app.project.set_segment_range(
-                self.selected_index,
+            segments = self.app.project.set_segments_range(
+                targets,
                 start=self.in_var.get(),
                 end=self.out_var.get(),
             )
         except (ValueError, OSError) as exc:
             self._log(f"Cannot apply range: {exc}")
             return
-        self._log(f"{segment['name']} set to {segment['start']:.2f}s - {segment['end']:.2f}s.")
+        for segment in segments:
+            self._log(f"{segment['name']} set to {segment['start']:.2f}s - {segment['end']:.2f}s.")
         self.app.refresh_views()
 
     def _build_context_menu(self, index: int) -> tk.Menu:
@@ -211,6 +224,7 @@ class TimelineView(ctk.CTkFrame):
         if not (0 <= index < len(timeline)):
             return menu
         name = timeline[index].get("name", "clip")
+        multi_selected = index in self.selected_indices and len(self.selected_indices) > 1
         menu.add_command(label=f"Clip {index + 1}: {name}", state="disabled")
         menu.add_separator()
         for group in ("Clip", "Transform", "Audio", "Overlay", "Export", "Info"):
@@ -225,7 +239,10 @@ class TimelineView(ctk.CTkFrame):
                 )
             menu.add_cascade(label=group, menu=submenu)
         menu.add_separator()
-        menu.add_command(label="Detach Audio", command=lambda: self._detach_audio(index))
+        menu.add_command(
+            label="Detach Audio",
+            command=lambda: self._detach_audio() if multi_selected else self._detach_audio(index),
+        )
         menu.add_command(label="Add New Layer", command=self._add_layer)
         layer_menu = tk.Menu(menu, tearoff=0)
         top = self.app.project.top_layer()
@@ -240,7 +257,10 @@ class TimelineView(ctk.CTkFrame):
         menu.add_command(label="Move Left", command=lambda: self._move_clip(index, -1))
         menu.add_command(label="Move Right", command=lambda: self._move_clip(index, 1))
         menu.add_separator()
-        menu.add_command(label="Remove from timeline", command=lambda: self._remove_clip(index))
+        menu.add_command(
+            label="Remove from timeline",
+            command=lambda: self._remove() if multi_selected else self._remove_clip(index),
+        )
         return menu
 
     def _build_ui(self) -> None:
@@ -361,7 +381,7 @@ class TimelineView(ctk.CTkFrame):
             width=72,
             command=self._on_zoom_change,
         )
-        self.zoom_menu.set(str(ZOOM_LEVELS[2]))
+        self.zoom_menu.set(str(ZOOM_LEVELS[0]))
         self.zoom_menu.pack(side="left", padx=(0, 6))
         self.strip = ClipStrip(
             strip_area,
@@ -371,6 +391,7 @@ class TimelineView(ctk.CTkFrame):
             on_play=self._on_strip_play,
             on_context=self._on_strip_context,
             on_cut=self._on_cut,
+            on_zoom=self._on_strip_zoom,
         )
         self.strip.pack(side="left", fill="x", expand=True)
 
@@ -484,18 +505,21 @@ class TimelineView(ctk.CTkFrame):
 
     def _scroll_strip(self, step: int) -> None:
         """Scroll the clip strip sideways by whole units."""
-        canvas = getattr(self.strip._strip, "_parent_canvas", None)
-        if canvas is not None:
-            canvas.xview_scroll(step, "units")
+        self.strip.scroll_by(step)
 
     def _on_wheel(self, event: Any) -> str | None:
-        """Scroll the clip strip with the wheel or trackpad when over it."""
+        """Scroll the strip or zoom it with a modifier-wheel."""
         if not self.strip.winfo_ismapped():
             return None
         if not self.strip.over_strip(*self.winfo_pointerxy()):
             return None
         delta = int(getattr(event, "delta", 0) or 0)
         button = str(getattr(event, "num", "") or "")
+        state = int(getattr(event, "state", 0) or 0)
+        direction = 1 if delta > 0 or button == "4" else -1
+        if state & (0x4 | 0x10):
+            self._zoom_strip(direction, int(getattr(event, "x_root", 0)))
+            return "break"
         if delta:
             self._scroll_strip(-1 if delta > 0 else 1)
         elif button in {"4", "5"}:
@@ -574,6 +598,8 @@ class TimelineView(ctk.CTkFrame):
             self._log("Nothing to undo.")
             return
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self._log("Undo.")
         self.app.refresh_views()
 
@@ -583,6 +609,8 @@ class TimelineView(ctk.CTkFrame):
             self._log("Nothing to redo.")
             return
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self._log("Redo.")
         self.app.refresh_views()
 
@@ -606,6 +634,8 @@ class TimelineView(ctk.CTkFrame):
             self._log(f"Cannot paste clip: {exc}")
             return
         self.selected_index = self.app.project.timeline.index(segment)
+        self.selected_indices = {self.selected_index}
+        self._selection_anchor = self.selected_index
         self._log(
             f"Pasted {segment.get('name', 'clip')} on "
             f"{layer_label(int(segment.get('layer') or 0))}."
@@ -830,6 +860,8 @@ class TimelineView(ctk.CTkFrame):
         """Remove every segment from the timeline."""
         self.app.project.clear_timeline()
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self._log("Timeline cleared.")
         self.app.refresh_views()
 
@@ -853,27 +885,38 @@ class TimelineView(ctk.CTkFrame):
         self.log.configure(state="disabled")
 
     def _move(self, offset: int) -> None:
-        """Move the selected segment up or down the timeline."""
-        if self.selected_index is None:
+        """Move selected segments up or down the timeline together."""
+        targets = self._selected_targets()
+        if not targets:
             self._log("Select a timeline clip first.")
             return
-        target = self.selected_index + offset
+        selected = [self.app.project.timeline[index] for index in targets]
         try:
-            self.app.project.move_segment(self.selected_index, target)
+            moved = self.app.project.move_segments(targets, offset)
         except (ValueError, OSError) as exc:
             self._log(f"Cannot move clip: {exc}")
             return
-        self.selected_index = max(0, target)
+        self.selected_indices = {
+            self.app.project.timeline.index(segment) for segment in moved
+        }
+        primary = self.app.project.timeline.index(selected[-1])
+        self.selected_index = primary
+        self._selection_anchor = self.selected_index
         self.app.refresh_views()
 
     def _move_clip(self, index: int, offset: int) -> None:
         """Move a clip from the context menu."""
+        if index in self.selected_indices and len(self.selected_indices) > 1:
+            self._move(offset)
+            return
         try:
             self.app.project.move_segment(index, index + offset)
         except (ValueError, OSError) as exc:
             self._log(f"Cannot move clip: {exc}")
             return
         self.selected_index = max(0, index + offset)
+        self.selected_indices = {self.selected_index}
+        self._selection_anchor = self.selected_index
         self.app.refresh_views()
 
     def _add_layer(self) -> None:
@@ -883,55 +926,83 @@ class TimelineView(ctk.CTkFrame):
 
     def _detach_audio(self, index: int | None = None) -> None:
         """Move a clip's audio onto its own lane below the clip."""
-        target = self.selected_index if index is None else index
-        if target is None:
+        targets = [index] if index is not None else self._selected_targets()
+        if not targets:
             self._log("Select a timeline clip first.")
             return
         try:
-            segment, audio = self.app.project.detach_audio(target)
+            detached = self.app.project.detach_audio_segments(targets)
         except (ValueError, OSError) as exc:
-            self._log(f"Cannot separate audio: {exc}")
+            self._log(f"Cannot separate selected clips: {exc}")
             return
-        self.selected_index = self.app.project.timeline.index(segment)
-        self._log(
-            f"Separated the audio of {segment.get('name', 'clip')} onto "
-            f"{layer_label(audio['layer'])}."
-        )
+        for segment, audio in detached:
+            self._log(
+                f"Separated the audio of {segment.get('name', 'clip')} onto "
+                f"{layer_label(audio['layer'])}."
+            )
+        if detached:
+            self.selected_indices = {
+                self.app.project.timeline.index(segment) for segment, _audio in detached
+            }
+            self.selected_index = max(self.selected_indices)
         self.app.refresh_views()
 
     def _change_layer(self, offset: int) -> None:
-        """Move the selected clip up or down one layer."""
-        if self.selected_index is None:
+        """Move every selected clip up or down one layer."""
+        targets = self._selected_targets()
+        if not targets:
             self._log("Select a timeline clip first.")
             return
         timeline_items = self.app.project.timeline
-        if not 0 <= self.selected_index < len(timeline_items):
-            return
-        segment = timeline_items[self.selected_index]
-        target = int(segment.get("layer") or 0) + offset
-        if target < self.app.project.bottom_layer():
+        selected = [timeline_items[index] for index in targets]
+        layers = [int(segment.get("layer") or 0) + offset for segment in selected]
+        if any(layer < self.app.project.bottom_layer() for layer in layers):
             self._log("There is no lane below this one.")
             return
-        self._send_to_layer(self.selected_index, target)
+        self._set_selected_layers(targets, layers)
 
     def _send_to_layer(self, index: int, layer: int) -> None:
         """Move a clip to a layer, adding it when the layer is new."""
-        if layer > self.app.project.top_layer():
-            self.app.project.add_layer()
+        targets = (
+            self._selected_targets()
+            if index in self.selected_indices and len(self.selected_indices) > 1
+            else [index]
+        )
+        self._set_selected_layers(targets, [layer] * len(targets))
+
+    def _set_selected_layers(self, targets: list[int], layers: list[int]) -> None:
+        """Apply target layers to a group and preserve its selection."""
+        if not targets:
+            return
+        selected = [self.app.project.timeline[index] for index in targets]
         try:
-            segment = self.app.project.set_segment_layer(index, layer)
+            moved = self.app.project.set_segments_layers(targets, layers)
         except (ValueError, OSError) as exc:
             self._log(f"Cannot move clip: {exc}")
             return
-        self.selected_index = self.app.project.timeline.index(segment)
-        self._log(f"Moved {segment.get('name', 'clip')} to {layer_label(layer)}.")
+        self.selected_indices = {
+            self.app.project.timeline.index(segment) for segment in moved
+        }
+        self.selected_index = self.app.project.timeline.index(selected[-1])
+        self._selection_anchor = self.selected_index
+        for segment, target in zip(moved, layers):
+            self._log(f"Moved {segment.get('name', 'clip')} to {layer_label(target)}.")
         self.app.refresh_views()
+
+    def _selected_targets(self) -> list[int]:
+        """Return selected timeline positions, falling back to the primary clip."""
+        selected = self.selected_indices or (
+            {self.selected_index} if self.selected_index is not None else set()
+        )
+        return sorted(index for index in selected if 0 <= index < len(self.app.project.timeline))
 
     def _new_project(self) -> None:
         """Start a fresh project with an empty pool and timeline."""
         self.app.project.media.clear()
         self.app.project.clear_timeline()
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self._log("New project started.")
         self.app.refresh_views()
 
@@ -953,11 +1024,22 @@ class TimelineView(ctk.CTkFrame):
         timeline = self.app.project.timeline
         if not (0 <= index < len(timeline)):
             return
-        source = str(timeline[index].get("path") or "")
+        targets = (
+            self._selected_targets()
+            if index in self.selected_indices and len(self.selected_indices) > 1
+            else [index]
+        )
+        source_paths = [str(timeline[target].get("path") or "") for target in targets]
+        source_paths = [path for path in source_paths if path]
+        source = source_paths[0] if source_paths else ""
         if not source:
             return
         OperationDialog(
-            self, op, source, on_done=lambda result: self._on_operation_done(result, op)
+            self,
+            op,
+            source,
+            on_done=lambda result: self._on_operation_done(result, op),
+            source_paths=source_paths,
         )
 
     def _open_output(self) -> None:
@@ -980,6 +1062,8 @@ class TimelineView(ctk.CTkFrame):
             self._log(f"Cannot open project: {exc}")
             return
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self._log(f"Opened project {Path(path).name}.")
         self.app.refresh_views()
 
@@ -1102,8 +1186,17 @@ class TimelineView(ctk.CTkFrame):
         output = result.get("output")
         if output:
             self._log(f"Output: {output}")
+        for item in result.get("outputs", []):
+            self._log(f"Output: {item}")
         if op is not None and op.name.startswith("transcribe") and result.get("success"):
-            self._show_transcript(result)
+            details = result.get("details")
+            if isinstance(details, list):
+                text = "\n\n".join(
+                    transcribe_ops.transcript_text(item or {}) for item in details
+                )
+                TextDialog(self, "Transcript", text)
+            else:
+                self._show_transcript(result)
         self.app.refresh_views()
 
     def _on_slider(self, value: float) -> None:
@@ -1118,12 +1211,33 @@ class TimelineView(ctk.CTkFrame):
             self._log(message)
         if select is not None:
             self.selected_index = select
+            self.selected_indices = {select}
+            self._selection_anchor = select
         self.app.refresh_views()
 
-    def _on_strip_select(self, index: int) -> None:
-        """Select a clip that was clicked in the strip."""
-        if 0 <= index < len(self.app.project.timeline):
-            self._select(index)
+    def _on_strip_select(self, index: int, event: Any = None) -> None:
+        """Select, toggle, or range-select clips from the strip."""
+        if not 0 <= index < len(self.app.project.timeline):
+            return
+        state = int(getattr(event, "state", 0) or 0)
+        toggle = bool(state & (0x4 | 0x10))
+        if state & 0x1 and self._selection_anchor is not None:
+            start, end = sorted((self._selection_anchor, index))
+            selected = set(self.selected_indices)
+            selected.update(range(start, end + 1))
+            self._set_selection(selected, index)
+        elif toggle:
+            selected = set(self.selected_indices)
+            if index in selected:
+                selected.remove(index)
+            else:
+                selected.add(index)
+            self._selection_anchor = index
+            primary = index if index in selected else (max(selected) if selected else None)
+            self._set_selection(selected, primary)
+        else:
+            self._selection_anchor = index
+            self._set_selection({index}, index)
 
     def _on_strip_context(self, index: int, event: Any) -> None:
         """Show the clip context menu at the pointer."""
@@ -1141,6 +1255,15 @@ class TimelineView(ctk.CTkFrame):
     def _on_zoom_change(self, level: str) -> None:
         """Rescale the clip strip to a new zoom level."""
         self.strip.set_zoom(level)
+
+    def _on_strip_zoom(self, level: float) -> None:
+        """Sync the zoom menu after a wheel gesture changes the strip scale."""
+        self.zoom_menu.set(str(int(level)))
+
+    def _zoom_strip(self, direction: int, pointer_x: int) -> None:
+        """Zoom around the pointer position on the clip strip."""
+        level = self.strip.zoom_by(direction, pointer_x)
+        self.zoom_menu.set(str(int(level)))
 
     def _pause_play(self) -> None:
         """Pause playback at the current position."""
@@ -1293,17 +1416,21 @@ class TimelineView(ctk.CTkFrame):
         self.time_label.configure(text=f"{_time_text(position)} / {_time_text(total)}")
 
     def _remove(self) -> None:
-        """Remove the selected segment from the timeline."""
-        if self.selected_index is None:
+        """Remove every selected segment from the timeline."""
+        targets = self._selected_targets()
+        if not targets:
             self._log("Select a timeline clip first.")
             return
         try:
-            segment = self.app.project.remove_segment(self.selected_index)
+            removed = self.app.project.remove_segments(targets)
         except (ValueError, OSError) as exc:
-            self._log(f"Cannot remove clip: {exc}")
+            self._log(f"Cannot remove clips: {exc}")
             return
-        self._log(f"Removed {segment.get('name', 'clip')} from the timeline.")
+        for segment in removed:
+            self._log(f"Removed {segment.get('name', 'clip')} from the timeline.")
+        self.selected_indices.clear()
         self.selected_index = None
+        self._selection_anchor = None
         self.app.refresh_views()
 
     def _remove_clip(self, index: int) -> None:
@@ -1315,6 +1442,8 @@ class TimelineView(ctk.CTkFrame):
             return
         self._log(f"Removed {segment.get('name', 'clip')} from the timeline.")
         self.selected_index = None
+        self.selected_indices.clear()
+        self._selection_anchor = None
         self.app.refresh_views()
 
     def _toggle_cut(self) -> None:
@@ -1360,6 +1489,8 @@ class TimelineView(ctk.CTkFrame):
             self._log(f"Cannot cut clip: {exc}")
             return
         self.selected_index = self.app.project.timeline.index(second)
+        self.selected_indices = {self.selected_index}
+        self._selection_anchor = self.selected_index
         name = segment.get("name", "clip")
         self._log(f"Cut {name} at {position:.2f}s into two clips.")
         self.app.refresh_views()
@@ -1399,15 +1530,27 @@ class TimelineView(ctk.CTkFrame):
             return
         self._log(f"Saved project to {saved.name}.")
 
-    def _select(self, index: int) -> None:
-        """Select a timeline segment, fill the range fields, and move the playhead."""
-        self.selected_index = index
-        segment = self.app.project.timeline[index]
+    def _set_selection(self, indices: set[int], primary: int | None) -> None:
+        """Update highlighted clips and sync the primary clip fields."""
+        self.selected_indices = {
+            index for index in indices if 0 <= index < len(self.app.project.timeline)
+        }
+        self.selected_index = primary if primary in self.selected_indices else (
+            max(self.selected_indices) if self.selected_indices else None
+        )
+        self.strip.select(self.selected_indices)
+        if self.selected_index is None:
+            return
+        segment = self.app.project.timeline[self.selected_index]
         self.in_var.set(f"{float(segment.get('start') or 0):.2f}")
         self.out_var.set(f"{float(segment.get('end') or 0):.2f}")
-        self.strip.select(index)
         if not self._playing and not self._preparing:
             self._seek_to(float(segment.get("abs_start") or 0.0))
+
+    def _select(self, index: int) -> None:
+        """Select one timeline segment and move the playhead."""
+        self._selection_anchor = index
+        self._set_selection({index}, index)
 
 
 def _duration_text(duration: float) -> str:
