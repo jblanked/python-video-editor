@@ -104,6 +104,9 @@ def exercise(app: VideoEditorApp) -> None:
     timeline._on_strip_select(1, SimpleNamespace(state=4))
     assert timeline.selected_indices == {0, 2}, timeline.selected_indices
     assert strip._selected == {0, 2}, strip._selected
+    timeline.select_all_button.invoke()
+    assert timeline.selected_indices == set(range(3)), timeline.selected_indices
+    assert strip._selected == set(range(3)), strip._selected
     timeline._set_selection(set(), None)
     strip.set_zoom(40)
     app.update()

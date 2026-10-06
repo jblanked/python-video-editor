@@ -383,6 +383,13 @@ class TimelineView(ctk.CTkFrame):
         )
         self.zoom_menu.set(str(ZOOM_LEVELS[0]))
         self.zoom_menu.pack(side="left", padx=(0, 6))
+        self.select_all_button = ctk.CTkButton(
+            strip_area,
+            text="Select All",
+            width=76,
+            command=self._select_all,
+        )
+        self.select_all_button.pack(side="left", padx=(0, 6))
         self.strip = ClipStrip(
             strip_area,
             self.app.project,
@@ -1551,6 +1558,13 @@ class TimelineView(ctk.CTkFrame):
         """Select one timeline segment and move the playhead."""
         self._selection_anchor = index
         self._set_selection({index}, index)
+
+    def _select_all(self) -> None:
+        """Select every clip currently on the timeline."""
+        selected = set(range(len(self.app.project.timeline)))
+        primary = max(selected) if selected else None
+        self._selection_anchor = primary
+        self._set_selection(selected, primary)
 
 
 def _duration_text(duration: float) -> str:
